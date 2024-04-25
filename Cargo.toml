@@ -1,5 +1,5 @@
 [workspace]
-members = ["plain"]
+members = ["poseidon2"]
 resolver = "1"
 
 [profile.release]

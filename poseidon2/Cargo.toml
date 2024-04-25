@@ -1,6 +1,6 @@
 [package]
 name = "poseidon2"
-version = "1.0"
+version = "0.1.0"
 authors = ["ak36 <ak10495@nyu.edu>"]
 description = "Rust and Halo2 implementations of Poseidon2"
 edition = "2021"
@@ -16,6 +16,7 @@ sha3 = "0.10"
 sha2 = "0.10"
 blake2 = "0.10"
 # for sinsemilla:
+ff = "0.13"
 group = "0.13"
 halo2 = "=0.1.0-beta.2"
 pasta_curves = "0.5"
@@ -27,6 +28,7 @@ bitvec = "1.0"
 byteorder = "1.4"
 jubjub = "0.9"
 bls12_381 = "0.7"
+halo2_proofs = { git = "https://github.com/amit0365/halo2.git", package="halo2_proofs", branch = "protostar"}
 
 [dev-dependencies]
 criterion = "0.4"
