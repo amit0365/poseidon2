@@ -1,0 +1,11 @@
+[workspace]
+members = ["plain"]
+resolver = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 0
+debug = true
