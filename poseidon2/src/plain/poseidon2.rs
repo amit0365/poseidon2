@@ -82,7 +82,7 @@ impl<F: PrimeField> Poseidon2<F> {
         }
     }
 
-    fn matmul_m4(&self, input: &mut[F]) {
+    pub fn matmul_m4(&self, input: &mut[F]) {
         let t = self.params.t;
         let t4 = t / 4;
         for i in 0..t4 {
@@ -116,7 +116,7 @@ impl<F: PrimeField> Poseidon2<F> {
         }
     }
 
-    fn matmul_external(&self, input: &mut[F]) {
+    pub fn matmul_external(&self, input: &mut[F]) {
         let t = self.params.t;
         match t {
             2 => {
@@ -162,7 +162,7 @@ impl<F: PrimeField> Poseidon2<F> {
         }
     }
 
-    fn matmul_internal(&self, input: &mut[F], mat_internal_diag_m_1: &[F]) {
+    pub fn matmul_internal(&self, input: &mut[F], mat_internal_diag_m_1: &[F]) {
         let t = self.params.t;
 
         match t {

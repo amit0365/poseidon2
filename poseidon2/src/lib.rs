@@ -1,4 +1,3 @@
-pub mod primitives;
 pub mod circuit;
 pub mod fields;
 pub mod plain;

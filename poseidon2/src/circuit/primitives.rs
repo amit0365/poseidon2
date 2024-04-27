@@ -3,9 +3,6 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::iter;
-use std::marker::PhantomData;
-
-use ff::FromUniformBytes;
 use ff::PrimeField;
 use halo2_proofs::arithmetic::Field;
 
@@ -80,7 +77,7 @@ pub trait Spec<F: Field, const T: usize, const RATE: usize>: fmt::Debug {
 //         })
 //         .collect();
 
-//     let (mds, mds_inv) = mds::generate_mds::<F, T>(&mut grain, S::secure_mds());
+//     let (matmul_external, matmul_internal) = matmul_external
 
 //     (round_constants, mds, mds_inv)
 // }

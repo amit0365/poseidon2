@@ -11,9 +11,7 @@ use halo2_proofs::{
     plonk::Error,
 };
 
-
-use super::pow5::{Pow5Chip, Pow5Config, StateWord};
-use crate::primitives::{Absorbing, ConstantLength, Domain, Spec, SpongeMode, Squeezing, State};
+use super::primitives::{Absorbing, ConstantLength, Domain, Spec, SpongeMode, Squeezing, State};
 
 /// A word from the padded input to a Poseidon sponge.
 #[derive(Clone, Debug)]
