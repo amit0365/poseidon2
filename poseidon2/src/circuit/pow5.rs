@@ -1,6 +1,7 @@
-use std::convert::TryInto;
+use std::{convert::TryInto, marker::PhantomData};
 use std::iter;
 
+use halo2_proofs::dev::MockProver;
 use halo2_proofs::{
     arithmetic::Field,
     circuit::{AssignedCell, Cell, Chip, Layouter, Region, Value},
@@ -11,6 +12,8 @@ use halo2_proofs::{
 };
 
 pub const WIDTH_CHOICES: [usize; 8] = [2, 3, 4, 8, 12, 16, 20, 24];
+use crate::circuit::spec::PoseidonSpecFp;
+
 use super::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
 use super::utils::Var;
 use super::primitives::{Absorbing, Domain, Mds, Spec, Squeezing, State};
@@ -21,14 +24,14 @@ pub struct Pow5Config<F: Field, const WIDTH: usize, const RATE: usize> {
     pub state: [Column<Advice>; WIDTH],
     partial_sbox: Column<Advice>,
     rc_a: [Column<Fixed>; WIDTH],
-    rc_b: [Column<Fixed>; WIDTH],
+    pad_fixed: [Column<Fixed>; WIDTH],
     s_full: Selector,
     s_first: Selector,
     s_partial: Selector,
     s_pad_and_add: Selector,
 
     half_full_rounds: usize,
-    half_partial_rounds: usize,
+    full_partial_rounds: usize,
     alpha: [u64; 4],
     round_constants: Vec<[F; WIDTH]>,
     mat_external: Mds<F, WIDTH>,
@@ -59,7 +62,7 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
         state: [Column<Advice>; WIDTH],
         partial_sbox: Column<Advice>,
         rc_a: [Column<Fixed>; WIDTH],
-        rc_b: [Column<Fixed>; WIDTH],
+        pad_fixed: [Column<Fixed>; WIDTH],
     ) -> Pow5Config<F, WIDTH, RATE> {
         assert_eq!(RATE, WIDTH - 1);
         // Generate constants for the Poseidon permutation.
@@ -67,7 +70,7 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
         assert!(S::full_rounds() & 1 == 0);
         assert!(S::partial_rounds() & 1 == 0);
         let half_full_rounds = S::full_rounds() / 2;
-        let half_partial_rounds = S::partial_rounds() / 2;
+        let full_partial_rounds = S::partial_rounds();
         let (round_constants, mat_external, mat_internal) = S::constants();
 
         // This allows state words to be initialized (by constraining them equal to fixed
@@ -149,24 +152,18 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
             };
 
             let next = |idx: usize, meta: &mut VirtualCells<F>| {
-                (0..WIDTH)
-                    .map(|next_idx| {
-                        let next = meta.query_advice(state[next_idx], Rotation::next());
-                        next * mat_internal[idx][next_idx]
-                    })
-                    .reduce(|acc, next| acc + next)
-                    .expect("WIDTH > 0")
+                meta.query_advice(state[idx], Rotation::next())
             };
 
             let partial_round_linear = |idx: usize, meta: &mut VirtualCells<F>| {
-                mid(idx, meta) - next(idx, meta)
+                mid(idx, meta)
             };
 
             Constraints::with_selector(
                 s_partial,
                 std::iter::empty()
                     .chain(Some(pow_5(cur_0 + rc_a0) - mid_0.clone()))
-                    .chain((1..WIDTH).map(|idx| partial_round_linear(idx, meta)))
+                    .chain((1..WIDTH).map(|idx| partial_round_linear(idx, meta) - next(idx, meta)))
                     .collect::<Vec<_>>(),
             )
         });
@@ -200,13 +197,13 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
             state,
             partial_sbox,
             rc_a,
-            rc_b,
+            pad_fixed,
             s_full,
             s_first,
             s_partial,
             s_pad_and_add,
             half_full_rounds,
-            half_partial_rounds,
+            full_partial_rounds,
             alpha,
             round_constants,
             mat_external,
@@ -255,12 +252,12 @@ impl<F: Field, S: Spec<F, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>
                     res.and_then(|state| state.full_round(&mut region, config, r, r + 1))
                 })?;
 
-                let state = (0..config.half_partial_rounds).fold(Ok(state), |res, r| {
+                let state = (0..config.full_partial_rounds).fold(Ok(state), |res, r| {
                     res.and_then(|state| {
                         state.partial_round(
                             &mut region,
                             config,
-                            config.half_full_rounds + 2 * r,
+                            config.half_full_rounds + r,
                             config.half_full_rounds + r + 1,
                         )
                     })
@@ -271,8 +268,8 @@ impl<F: Field, S: Spec<F, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>
                         state.full_round(
                             &mut region,
                             config,
-                            config.half_full_rounds + 2 * config.half_partial_rounds + r,
-                            config.half_full_rounds + config.half_partial_rounds + r + 1,
+                            config.half_full_rounds + config.full_partial_rounds + r,
+                            config.half_full_rounds + config.full_partial_rounds + r + 1,
                         )
                     })
                 })?;
@@ -358,7 +355,7 @@ impl<
                             let cell = region
                                 .assign_fixed(
                                     || format!("load pad_{}", i),
-                                    config.rc_b[i],
+                                    config.pad_fixed[i],
                                     1,
                                     || Value::known(padding_value),
                                 )?
@@ -468,7 +465,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
     ) -> Result<Self, Error> {
         let offset = 0; // first layer
         config.s_first.enable(region, offset)?;
-            let q = self.0.iter().enumerate().map(|(idx, word)| {
+            let q = self.0.iter().map(|word| {
                 word.0
                     .value()
                     .map(|v| *v)
@@ -534,15 +531,14 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         offset: usize,
     ) -> Result<Self, Error> {
         Self::round(region, config, round, offset, config.s_partial, |region| {
-            let m = &config.mat_external;
+            let m = &config.mat_internal;
             let p: Value<Vec<_>> = self.0.iter().map(|word| word.0.value().cloned()).collect();
 
             let r: Value<Vec<_>> = p.map(|p| {
                 let r_0 = (p[0] + config.round_constants[round][0]).pow(config.alpha);
                 let r_i = p[1..]
                     .iter()
-                    .enumerate()
-                    .map(|(i, p_i)| *p_i + config.round_constants[round][i + 1]);
+                    .copied();
                 std::iter::empty().chain(Some(r_0)).chain(r_i).collect()
             });
 
@@ -553,21 +549,10 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
                 || r.as_ref().map(|r| r[0]),
             )?;
 
-            let p_mid: Value<Vec<_>> = m
-                .iter()
-                .map(|m_i| {
-                    r.as_ref().map(|r| {
-                        m_i.iter()
-                            .zip(r.iter())
-                            .fold(F::ZERO, |acc, (m_ij, r_j)| acc + *m_ij * r_j)
-                    })
-                })
-                .collect();
-
             let state: Vec<Value<_>> = m
                 .iter()
                 .map(|m_i| {
-                    p_mid.as_ref().map(|r| {
+                    r.as_ref().map(|r| {
                         m_i.iter()
                             .zip(r.iter())
                             .fold(F::ZERO, |acc, (m_ij, r_j)| acc + *m_ij * r_j)
@@ -621,132 +606,143 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use group::ff::{Field, PrimeField};
-//     use halo2_proofs::{
-//         circuit::{Layouter, SimpleFloorPlanner, Value},
-//         dev::MockProver,
-//         plonk::{Circuit, ConstraintSystem, Error},
-//     };
-//     use halo2curves::pasta::{pallas, Fp};
-//     use rand::rngs::OsRng;
+#[cfg(test)]
+mod tests {
+    use group::ff::{Field, PrimeField};
+    use halo2_proofs::{
+        circuit::{Layouter, SimpleFloorPlanner, Value},
+        dev::MockProver,
+        plonk::{Circuit, ConstraintSystem, Error},
+    };
+    use halo2_proofs::halo2curves::bn256::{Fq as Fp};
+    //use rand::rngs::OsRng;
 
-//     use super::{PoseidonInstructions, Pow5Chip, Pow5Config, StateWord};
-//     use crate::poseidon::{
-//         primitives::{self as poseidon, ConstantLength, P128Pow5T3 as OrchardNullifier, Spec},
-//         Hash,
-//     };
-//     use std::convert::TryInto;
-//     use std::marker::PhantomData;
+    use crate::circuit::spec::PoseidonSpecFp;
 
-//     struct PermuteCircuit<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>(
-//         PhantomData<S>,
-//     );
+    use super::{PoseidonInstructions, Pow5Chip, Pow5Config, StateWord};
+    use super::super::primitives::{self as poseidon, ConstantLength, Spec}; // P128Pow5T3 as OrchardNullifier
+    use std::convert::TryInto;
+    use std::marker::PhantomData;
 
-//     impl<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize> Circuit<Fp>
-//         for PermuteCircuit<S, WIDTH, RATE>
-//     {
-//         type Config = Pow5Config<Fp, WIDTH, RATE>;
-//         type FloorPlanner = SimpleFloorPlanner;
-//         #[cfg(feature = "circuit-params")]
-//         type Params = ();
+    struct PermuteCircuit<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>(
+        PhantomData<S>,
+    );
 
-//         fn without_witnesses(&self) -> Self {
-//             PermuteCircuit::<S, WIDTH, RATE>(PhantomData)
-//         }
+    impl<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize> Circuit<Fp>
+        for PermuteCircuit<S, WIDTH, RATE>
+    {
+        type Config = Pow5Config<Fp, WIDTH, RATE>;
+        type FloorPlanner = SimpleFloorPlanner;
+        type Params = ();
 
-//         fn configure(meta: &mut ConstraintSystem<Fp>) -> Pow5Config<Fp, WIDTH, RATE> {
-//             let state = (0..WIDTH).map(|_| meta.advice_column()).collect::<Vec<_>>();
-//             let partial_sbox = meta.advice_column();
+        fn without_witnesses(&self) -> Self {
+            PermuteCircuit::<S, WIDTH, RATE>(PhantomData)
+        }
 
-//             let rc_a = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
-//             let rc_b = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Pow5Config<Fp, WIDTH, RATE> {
+            let state = (0..WIDTH).map(|_| meta.advice_column()).collect::<Vec<_>>();
+            let partial_sbox = meta.advice_column();
 
-//             Pow5Chip::configure::<S>(
-//                 meta,
-//                 state.try_into().unwrap(),
-//                 partial_sbox,
-//                 rc_a.try_into().unwrap(),
-//                 rc_b.try_into().unwrap(),
-//             )
-//         }
+            let rc_a = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
+            let pad_fixed = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
 
-//         fn synthesize(
-//             &self,
-//             config: Pow5Config<Fp, WIDTH, RATE>,
-//             mut layouter: impl Layouter<Fp>,
-//         ) -> Result<(), Error> {
-//             let initial_state = layouter.assign_region(
-//                 || "prepare initial state",
-//                 |mut region| {
-//                     let state_word = |i: usize| {
-//                         let value = Value::known(Fp::from(i as u64));
-//                         let var = region.assign_advice(
-//                             || format!("load state_{}", i),
-//                             config.state[i],
-//                             0,
-//                             || value,
-//                         )?;
-//                         Ok(StateWord(var))
-//                     };
+            Pow5Chip::configure::<S>(
+                meta,
+                state.try_into().unwrap(),
+                partial_sbox,
+                rc_a.try_into().unwrap(),
+                pad_fixed.try_into().unwrap(),
+            )
+        }
 
-//                     let state: Result<Vec<_>, Error> = (0..WIDTH).map(state_word).collect();
-//                     Ok(state?.try_into().unwrap())
-//                 },
-//             )?;
+        fn synthesize(
+            &self,
+            config: Pow5Config<Fp, WIDTH, RATE>,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            let initial_state = layouter.assign_region(
+                || "prepare initial state",
+                |mut region| {
+                    let state_word = |i: usize| {
+                        let value = Value::known(Fp::from(i as u64));
+                        let var = region.assign_advice(
+                            || format!("load state_{}", i),
+                            config.state[i],
+                            0,
+                            || value,
+                        )?;
+                        Ok(StateWord(var))
+                    };
 
-//             let chip = Pow5Chip::construct(config.clone());
-//             let final_state = <Pow5Chip<_, WIDTH, RATE> as PoseidonInstructions<
-//                 Fp,
-//                 S,
-//                 WIDTH,
-//                 RATE,
-//             >>::permute(&chip, &mut layouter, &initial_state)?;
+                    let state: Result<Vec<_>, Error> = (0..WIDTH).map(state_word).collect();
+                    Ok(state?.try_into().unwrap())
+                },
+            )?;
 
-//             // For the purpose of this test, compute the real final state inline.
-//             let mut expected_final_state = (0..WIDTH)
-//                 .map(|idx| Fp::from(idx as u64))
-//                 .collect::<Vec<_>>()
-//                 .try_into()
-//                 .unwrap();
-//             let (round_constants, mds, _) = S::constants();
-//             poseidon::permute::<_, S, WIDTH, RATE>(
-//                 &mut expected_final_state,
-//                 &mds,
-//                 &round_constants,
-//             );
+            let chip = Pow5Chip::construct(config.clone());
+            let final_state = <Pow5Chip<_, WIDTH, RATE> as PoseidonInstructions<
+                Fp,
+                S,
+                WIDTH,
+                RATE,
+            >>::permute(&chip, &mut layouter, &initial_state)?;
 
-//             layouter.assign_region(
-//                 || "constrain final state",
-//                 |mut region| {
-//                     let mut final_state_word = |i: usize| {
-//                         let var = region.assign_advice(
-//                             || format!("load final_state_{}", i),
-//                             config.state[i],
-//                             0,
-//                             || Value::known(expected_final_state[i]),
-//                         )?;
-//                         region.constrain_equal(final_state[i].0.cell(), var.cell())
-//                     };
+            // For the purpose of this test, compute the real final state inline.
+            // let mut expected_final_state = (0..WIDTH)
+            //     .map(|idx| Fp::from(idx as u64))
+            //     .collect::<Vec<_>>()
+            //     .try_into()
+            //     .unwrap();
+            // let (round_constants, mds, _) = S::constants();
+            // poseidon::permute::<_, S, WIDTH, RATE>(
+            //     &mut expected_final_state,
+            //     &mds,
+            //     &round_constants,
+            // );
 
-//                     for i in 0..(WIDTH) {
-//                         final_state_word(i)?;
-//                     }
+            // layouter.assign_region(
+            //     || "constrain final state",
+            //     |mut region| {
+            //         let mut final_state_word = |i: usize| {
+            //             let var = region.assign_advice(
+            //                 || format!("load final_state_{}", i),
+            //                 config.state[i],
+            //                 0,
+            //                 || Value::known(expected_final_state[i]),
+            //             )?;
+            //             region.constrain_equal(final_state[i].0.cell(), var.cell())
+            //         };
 
-//                     Ok(())
-//                 },
-//             )
-//         }
-//     }
+            //         for i in 0..(WIDTH) {
+            //             final_state_word(i)?;
+            //         }
 
-//     #[test]
-//     fn poseidon_permute() {
-//         let k = 6;
-//         let circuit = PermuteCircuit::<OrchardNullifier, 3, 2>(PhantomData);
-//         let prover = MockProver::run(k, &circuit, vec![]).unwrap();
-//         assert_eq!(prover.verify(), Ok(()))
-//     }
+            //         Ok(())
+            //     },
+            // )
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn poseidon_permute() {
+
+        use plotters::prelude::*;
+        let root = BitMapBackend::new("Poseidon2Chip.png", (1024, 3096)).into_drawing_area();
+        root.fill(&WHITE).unwrap();
+        let root = root.titled("Poseidon2Chip", ("sans-serif", 60)).unwrap();
+            
+        let k = 7;
+        let circuit = PermuteCircuit::<PoseidonSpecFp, 3, 2>(PhantomData);
+
+        halo2_proofs::dev::CircuitLayout::default()
+        .render(k, &circuit, &root)
+        .unwrap();
+
+        let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()))
+    }
 
 //     struct HashCircuit<
 //         S: Spec<Fp, WIDTH, RATE>,
@@ -937,3 +933,4 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
 //             .unwrap();
 //     }
 // }
+}

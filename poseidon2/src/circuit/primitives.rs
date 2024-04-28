@@ -3,6 +3,7 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::iter;
+use std::marker::PhantomData;
 use ff::PrimeField;
 use halo2_proofs::arithmetic::Field;
 

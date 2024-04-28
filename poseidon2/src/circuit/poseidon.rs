@@ -153,7 +153,7 @@ impl<
                     .unwrap(),
             ),
             state,
-            _marker: PhantomData::default(),
+            _marker: PhantomData,
         })
     }
 
@@ -234,9 +234,8 @@ impl<
     /// Transitions the sponge into its squeezing state.
     #[allow(clippy::type_complexity)]
     pub fn finish_squeezing(
-        mut self,
+        self,
         squeezed_cell: AssignedCell<F, F>,
-        mut layouter: impl Layouter<F>,
     ) -> Result<Sponge<F, PoseidonChip, S, Absorbing<PaddedWord<F>, RATE>, D, T, RATE>, Error>
     {   
         let mode = Absorbing::init_with(PaddedWord::Message(squeezed_cell));
@@ -244,7 +243,7 @@ impl<
             chip: self.chip,
             mode,
             state: self.state,
-            _marker: PhantomData::default(),
+            _marker: PhantomData,
         })
     }
 }

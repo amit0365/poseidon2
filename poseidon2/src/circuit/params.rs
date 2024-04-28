@@ -11,7 +11,7 @@ where F: PrimeField + halo2_proofs::halo2curves::serde::SerdeObject,
     let a = Vec::from_hex(&s[2..]).expect("Invalid Hex String");
     let mut bytes_copy = a.to_vec();
     bytes_copy.reverse();
-    F::from_raw_bytes(&a as &[u8]).unwrap()
+    F::from_raw_bytes_unchecked(&a as &[u8])
 }
 
 lazy_static! {

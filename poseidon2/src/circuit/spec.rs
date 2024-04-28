@@ -24,7 +24,7 @@ impl Spec<Fp, 3, 2> for PoseidonSpecFp {
     }
 
     fn partial_rounds() -> usize {
-        60
+        56
     }
 
     fn sbox(val: Fp) -> Fp {
