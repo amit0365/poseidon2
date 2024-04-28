@@ -1,7 +1,6 @@
-use std::{convert::TryInto, marker::PhantomData};
+use std::convert::TryInto;
 use std::iter;
 
-use halo2_proofs::dev::MockProver;
 use halo2_proofs::{
     arithmetic::Field,
     circuit::{AssignedCell, Cell, Chip, Layouter, Region, Value},
@@ -12,7 +11,6 @@ use halo2_proofs::{
 };
 
 pub const WIDTH_CHOICES: [usize; 8] = [2, 3, 4, 8, 12, 16, 20, 24];
-use crate::circuit::spec::PoseidonSpecFp;
 
 use super::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
 use super::utils::Var;
@@ -688,40 +686,36 @@ mod tests {
             >>::permute(&chip, &mut layouter, &initial_state)?;
 
             // For the purpose of this test, compute the real final state inline.
-            // let mut expected_final_state = (0..WIDTH)
-            //     .map(|idx| Fp::from(idx as u64))
-            //     .collect::<Vec<_>>()
-            //     .try_into()
-            //     .unwrap();
-            // let (round_constants, mds, _) = S::constants();
-            // poseidon::permute::<_, S, WIDTH, RATE>(
-            //     &mut expected_final_state,
-            //     &mds,
-            //     &round_constants,
-            // );
+            let mut expected_final_state = (0..WIDTH)
+                .map(|idx| Fp::from(idx as u64))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
 
-            // layouter.assign_region(
-            //     || "constrain final state",
-            //     |mut region| {
-            //         let mut final_state_word = |i: usize| {
-            //             let var = region.assign_advice(
-            //                 || format!("load final_state_{}", i),
-            //                 config.state[i],
-            //                 0,
-            //                 || Value::known(expected_final_state[i]),
-            //             )?;
-            //             region.constrain_equal(final_state[i].0.cell(), var.cell())
-            //         };
+            poseidon::permute::<_, S, WIDTH, RATE>(
+                &mut expected_final_state
+            );
 
-            //         for i in 0..(WIDTH) {
-            //             final_state_word(i)?;
-            //         }
+            layouter.assign_region(
+                || "constrain final state",
+                |mut region| {
+                    let mut final_state_word = |i: usize| {
+                        let var = region.assign_advice(
+                            || format!("load final_state_{}", i),
+                            config.state[i],
+                            0,
+                            || Value::known(expected_final_state[i]),
+                        )?;
+                        region.constrain_equal(final_state[i].0.cell(), var.cell())
+                    };
 
-            //         Ok(())
-            //     },
-            // )
+                    for i in 0..(WIDTH) {
+                        final_state_word(i)?;
+                    }
 
-            Ok(())
+                    Ok(())
+                },
+            )
         }
     }
 

@@ -83,53 +83,55 @@ pub trait Spec<F: Field, const T: usize, const RATE: usize>: fmt::Debug {
 //     (round_constants, mds, mds_inv)
 // }
 
-// /// Runs the Poseidon permutation on the given state.
-// pub(crate) fn permute<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
-//     state: &mut State<F, T>,
-//     mds: &Mds<F, T>,
-//     round_constants: &[[F; T]],
-// ) {
-//     let r_f = S::full_rounds() / 2;
-//     let r_p = S::partial_rounds();
+pub fn mat_mul<F: Field, const T: usize>(
+    current_state: &mut State<F, T>,
+    mat: &Mds<F, T>,
+) {
+    let new_state = mat.iter().map(|m_i| {
+        current_state
+            .iter()
+            .enumerate()
+            .fold(F::ZERO, |acc, (j, r_j)| acc + m_i[j] * r_j)
+    }).collect::<Vec<_>>().try_into().unwrap();
+    *current_state = new_state;
+}
 
-//     let apply_mds = |state: &mut State<F, T>| {
-//         let mut new_state = [F::ZERO; T];
-//         // Matrix multiplication
-//         #[allow(clippy::needless_range_loop)]
-//         for i in 0..T {
-//             for j in 0..T {
-//                 new_state[i] += mds[i][j] * state[j];
-//             }
-//         }
-//         *state = new_state;
-//     };
+/// Runs the Poseidon permutation on the given state.
+pub(crate) fn permute<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
+    current_state: &mut State<F, T>
+) {
 
-//     let full_round = |state: &mut State<F, T>, rcs: &[F; T]| {
-//         for (word, rc) in state.iter_mut().zip(rcs.iter()) {
-//             *word = S::sbox(*word + rc);
-//         }
-//         apply_mds(state);
-//     };
+    let r_f = S::full_rounds() / 2;
+    let r_p = S::partial_rounds();
+    let total_rounds = 2*r_f + r_p;
+    let (round_constants, mat_external, mat_internal) = S::constants();
 
-//     let part_round = |state: &mut State<F, T>, rcs: &[F; T]| {
-//         for (word, rc) in state.iter_mut().zip(rcs.iter()) {
-//             *word += rc;
-//         }
-//         // In a partial round, the S-box is only applied to the first state word.
-//         state[0] = S::sbox(state[0]);
-//         apply_mds(state);
-//     };
+    // Linear layer at beginning
+    mat_mul(current_state, &mat_external);
 
-//     iter::empty()
-//         .chain(iter::repeat(&full_round as &dyn Fn(&mut State<F, T>, &[F; T])).take(r_f))
-//         .chain(iter::repeat(&part_round as &dyn Fn(&mut State<F, T>, &[F; T])).take(r_p))
-//         .chain(iter::repeat(&full_round as &dyn Fn(&mut State<F, T>, &[F; T])).take(r_f))
-//         .zip(round_constants.iter())
-//         .fold(state, |state, (round, rcs)| {
-//             round(state, rcs);
-//             state
-//         });
-// }
+    for rc in round_constants.iter().take(r_f) {
+        for (i, state_elem) in current_state.iter_mut().enumerate() {
+            state_elem.add_assign(&rc[i]);
+            *state_elem = S::sbox(*state_elem);
+        }
+        mat_mul(current_state, &mat_external);
+    }
+
+    let p_end = r_f + r_p;
+    for rc in round_constants.iter().take(p_end).skip(r_f) {
+        current_state[0].add_assign(&rc[0]);
+        current_state[0] = S::sbox(current_state[0]);
+        mat_mul(current_state, &mat_internal);
+    }
+    
+    for rc in round_constants.iter().take(total_rounds).skip(p_end) {
+        for (i, state_elem) in current_state.iter_mut().enumerate() {
+            state_elem.add_assign(&rc[i]);
+            *state_elem = S::sbox(*state_elem);
+        }
+        mat_mul(current_state, &mat_external);
+    }
+}
 
 // fn poseidon_sponge<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
 //     state: &mut State<F, T>,
