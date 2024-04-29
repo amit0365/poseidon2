@@ -133,28 +133,28 @@ pub(crate) fn permute<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE:
     }
 }
 
-// fn poseidon_sponge<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
-//     state: &mut State<F, T>,
-//     input: Option<&Absorbing<F, RATE>>,
-//     mds_matrix: &Mds<F, T>,
-//     round_constants: &[[F; T]],
-// ) -> Squeezing<F, RATE> {
-//     if let Some(Absorbing(input)) = input {
-//         // `Iterator::zip` short-circuits when one iterator completes, so this will only
-//         // mutate the rate portion of the state.
-//         for (word, value) in state.iter_mut().zip(input.iter()) {
-//             *word += value.expect("poseidon_sponge is called with a padded input");
-//         }
-//     }
+fn poseidon_sponge<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>(
+    state: &mut State<F, T>,
+    input: Option<&Absorbing<F, RATE>>,
+    mds_matrix: &Mds<F, T>,
+    round_constants: &[[F; T]],
+) -> Squeezing<F, RATE> {
+    if let Some(Absorbing(input)) = input {
+        // `Iterator::zip` short-circuits when one iterator completes, so this will only
+        // mutate the rate portion of the state.
+        for (word, value) in state.iter_mut().zip(input.iter()) {
+            *word += value.expect("poseidon_sponge is called with a padded input");
+        }
+    }
 
-//     permute::<F, S, T, RATE>(state, mds_matrix, round_constants);
+    permute::<F, S, T, RATE>(state);
 
-//     let mut output = [None; RATE];
-//     for (word, value) in output.iter_mut().zip(state.iter()) {
-//         *word = Some(*value);
-//     }
-//     Squeezing(output)
-// }
+    let mut output = [None; RATE];
+    for (word, value) in output.iter_mut().zip(state.iter()) {
+        *word = Some(*value);
+    }
+    Squeezing(output)
+}
 
 mod private {
     pub trait SealedSpongeMode {}
@@ -188,102 +188,102 @@ impl<F: fmt::Debug, const RATE: usize> Absorbing<F, RATE> {
     }
 }
 
-// #[derive(Clone)]
-// /// A Poseidon sponge.
-// pub(crate) struct Sponge<
-//     F: Field,
-//     S: Spec<F, T, RATE>,
-//     M: SpongeMode,
-//     const T: usize,
-//     const RATE: usize,
-// > {
-//     mode: M,
-//     state: State<F, T>,
-//     mds_matrix: Mds<F, T>,
-//     round_constants: Vec<[F; T]>,
-//     _marker: PhantomData<S>,
-// }
+#[derive(Clone)]
+/// A Poseidon sponge.
+pub(crate) struct Sponge<
+    F: Field,
+    S: Spec<F, T, RATE>,
+    M: SpongeMode,
+    const T: usize,
+    const RATE: usize,
+> {
+    mode: M,
+    state: State<F, T>,
+    mds_matrix: Mds<F, T>,
+    round_constants: Vec<[F; T]>,
+    _marker: PhantomData<S>,
+}
 
-// impl<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>
-//     Sponge<F, S, Absorbing<F, RATE>, T, RATE>
-// {
-//     /// Constructs a new sponge for the given Poseidon specification.
-//     pub(crate) fn new(initial_capacity_element: F) -> Self {
-//         let (round_constants, mds_matrix, _) = S::constants();
+impl<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>
+    Sponge<F, S, Absorbing<F, RATE>, T, RATE>
+{
+    /// Constructs a new sponge for the given Poseidon specification.
+    pub(crate) fn new(initial_capacity_element: F) -> Self {
+        let (round_constants, mds_matrix, _) = S::constants();
 
-//         let mode = Absorbing([None; RATE]);
-//         let mut state = [F::ZERO; T];
-//         state[RATE] = initial_capacity_element;
+        let mode = Absorbing([None; RATE]);
+        let mut state = [F::ZERO; T];
+        state[RATE] = initial_capacity_element;
 
-//         Sponge {
-//             mode,
-//             state,
-//             mds_matrix,
-//             round_constants,
-//             _marker: PhantomData::default(),
-//         }
-//     }
+        Sponge {
+            mode,
+            state,
+            mds_matrix,
+            round_constants,
+            _marker: PhantomData::default(),
+        }
+    }
 
-//     /// Absorbs an element into the sponge.
-//     pub(crate) fn absorb(&mut self, value: F) {
-//         for entry in self.mode.0.iter_mut() {
-//             if entry.is_none() {
-//                 *entry = Some(value);
-//                 return;
-//             }
-//         }
+    /// Absorbs an element into the sponge.
+    pub(crate) fn absorb(&mut self, value: F) {
+        for entry in self.mode.0.iter_mut() {
+            if entry.is_none() {
+                *entry = Some(value);
+                return;
+            }
+        }
 
-//         // We've already absorbed as many elements as we can
-//         let _ = poseidon_sponge::<F, S, T, RATE>(
-//             &mut self.state,
-//             Some(&self.mode),
-//             &self.mds_matrix,
-//             &self.round_constants,
-//         );
-//         self.mode = Absorbing::init_with(value);
-//     }
+        // We've already absorbed as many elements as we can
+        let _ = poseidon_sponge::<F, S, T, RATE>(
+            &mut self.state,
+            Some(&self.mode),
+            &self.mds_matrix,
+            &self.round_constants,
+        );
+        self.mode = Absorbing::init_with(value);
+    }
 
-//     /// Transitions the sponge into its squeezing state.
-//     pub(crate) fn finish_absorbing(mut self) -> Sponge<F, S, Squeezing<F, RATE>, T, RATE> {
-//         let mode = poseidon_sponge::<F, S, T, RATE>(
-//             &mut self.state,
-//             Some(&self.mode),
-//             &self.mds_matrix,
-//             &self.round_constants,
-//         );
+    /// Transitions the sponge into its squeezing state.
+    pub(crate) fn finish_absorbing(mut self) -> Sponge<F, S, Squeezing<F, RATE>, T, RATE> {
+        let mode = poseidon_sponge::<F, S, T, RATE>(
+            &mut self.state,
+            Some(&self.mode),
+            &self.mds_matrix,
+            &self.round_constants,
+        );
 
-//         Sponge {
-//             mode,
-//             state: self.state,
-//             mds_matrix: self.mds_matrix,
-//             round_constants: self.round_constants,
-//             _marker: PhantomData::default(),
-//         }
-//     }
-// }
+        Sponge {
+            mode,
+            state: self.state,
+            mds_matrix: self.mds_matrix,
+            round_constants: self.round_constants,
+            _marker: PhantomData,
+        }
+    }
+}
 
-// impl<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>
-//     Sponge<F, S, Squeezing<F, RATE>, T, RATE>
-// {
-//     /// Squeezes an element from the sponge.
-//     pub(crate) fn squeeze(&mut self) -> F {
-//         loop {
-//             for entry in self.mode.0.iter_mut() {
-//                 if let Some(e) = entry.take() {
-//                     return e;
-//                 }
-//             }
+impl<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>
+    Sponge<F, S, Squeezing<F, RATE>, T, RATE>
+{
+    /// Squeezes an element from the sponge.
+    pub(crate) fn squeeze(&mut self) -> F {
+        loop {
+            for entry in self.mode.0.iter_mut() {
+                if let Some(e) = entry.take() {
+                    return e;
+                }
+            }
 
-//             // We've already squeezed out all available elements
-//             self.mode = poseidon_sponge::<F, S, T, RATE>(
-//                 &mut self.state,
-//                 None,
-//                 &self.mds_matrix,
-//                 &self.round_constants,
-//             );
-//         }
-//     }
-// }
+            // We've already squeezed out all available elements
+            self.mode = poseidon_sponge::<F, S, T, RATE>(
+                &mut self.state,
+                None,
+                &self.mds_matrix,
+                &self.round_constants,
+            );
+        }
+    }
+}
 
 /// A domain in which a Poseidon hash function is being used.
 pub trait Domain<F: Field, const RATE: usize> {
@@ -358,59 +358,59 @@ impl<F: PrimeField, const RATE: usize, const L: usize> Domain<F, RATE> for Const
     }
 }
 
-// #[derive(Clone)]
-// /// A Poseidon hash function, built around a sponge.
-// pub struct Hash<
-//     F: Field,
-//     S: Spec<F, T, RATE>,
-//     D: Domain<F, RATE>,
-//     const T: usize,
-//     const RATE: usize,
-// > {
-//     sponge: Sponge<F, S, Absorbing<F, RATE>, T, RATE>,
-//     _domain: PhantomData<D>,
-// }
+#[derive(Clone)]
+/// A Poseidon hash function, built around a sponge.
+pub struct Hash<
+    F: Field,
+    S: Spec<F, T, RATE>,
+    D: Domain<F, RATE>,
+    const T: usize,
+    const RATE: usize,
+> {
+    sponge: Sponge<F, S, Absorbing<F, RATE>, T, RATE>,
+    _domain: PhantomData<D>,
+}
 
-// impl<F: Field, S: Spec<F, T, RATE>, D: Domain<F, RATE>, const T: usize, const RATE: usize>
-//     fmt::Debug for Hash<F, S, D, T, RATE>
-// {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         f.debug_struct("Hash")
-//             .field("width", &T)
-//             .field("rate", &RATE)
-//             .field("R_F", &S::full_rounds())
-//             .field("R_P", &S::partial_rounds())
-//             .field("domain", &D::name())
-//             .finish()
-//     }
-// }
+impl<F: Field, S: Spec<F, T, RATE>, D: Domain<F, RATE>, const T: usize, const RATE: usize>
+    fmt::Debug for Hash<F, S, D, T, RATE>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hash")
+            .field("width", &T)
+            .field("rate", &RATE)
+            .field("R_F", &S::full_rounds())
+            .field("R_P", &S::partial_rounds())
+            .field("domain", &D::name())
+            .finish()
+    }
+}
 
-// impl<F: Field, S: Spec<F, T, RATE>, D: Domain<F, RATE>, const T: usize, const RATE: usize>
-//     Hash<F, S, D, T, RATE>
-// {
-//     /// Initializes a new hasher.
-//     pub fn init() -> Self {
-//         Hash {
-//             sponge: Sponge::new(D::initial_capacity_element()),
-//             _domain: PhantomData::default(),
-//         }
-//     }
-// }
+impl<F: Field, S: Spec<F, T, RATE>, D: Domain<F, RATE>, const T: usize, const RATE: usize>
+    Hash<F, S, D, T, RATE>
+{
+    /// Initializes a new hasher.
+    pub fn init() -> Self {
+        Hash {
+            sponge: Sponge::new(D::initial_capacity_element()),
+            _domain: PhantomData::default(),
+        }
+    }
+}
 
-// impl<F: PrimeField, S: Spec<F, T, RATE>, const T: usize, const RATE: usize, const L: usize>
-//     Hash<F, S, ConstantLength<L>, T, RATE>
-// {
-//     /// Hashes the given input.
-//     pub fn hash(mut self, message: [F; L]) -> F {
-//         for value in message
-//             .into_iter()
-//             .chain(<ConstantLength<L> as Domain<F, RATE>>::padding(L))
-//         {
-//             self.sponge.absorb(value);
-//         }
-//         self.sponge.finish_absorbing().squeeze()
-//     }
-// }
+impl<F: PrimeField, S: Spec<F, T, RATE>, const T: usize, const RATE: usize, const L: usize>
+    Hash<F, S, ConstantLength<L>, T, RATE>
+{
+    /// Hashes the given input.
+    pub fn hash(mut self, message: [F; L]) -> F {
+        for value in message
+            .into_iter()
+            .chain(<ConstantLength<L> as Domain<F, RATE>>::padding(L))
+        {
+            self.sponge.absorb(value);
+        }
+        self.sponge.finish_absorbing().squeeze()
+    }
+}
 
 // #[cfg(test)]
 // mod tests {

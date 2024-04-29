@@ -1,11 +1,33 @@
 // use std::cmp::min;
 
+use halo2_proofs::halo2curves::{
+    bn256, grumpkin,
+    pasta::{pallas, vesta},
+    CurveAffine,
+};
+
+pub trait TwoChainCurve: CurveAffine {
+    type Secondary: TwoChainCurve<ScalarExt = Self::Base, Base = Self::ScalarExt, Secondary = Self>;
+}
+
+impl TwoChainCurve for bn256::G1Affine {
+    type Secondary = grumpkin::G1Affine;
+}
+
+impl TwoChainCurve for grumpkin::G1Affine {
+    type Secondary = bn256::G1Affine;
+}
+
+impl TwoChainCurve for pallas::Affine {
+    type Secondary = vesta::Affine;
+}
+
+impl TwoChainCurve for vesta::Affine {
+    type Secondary = pallas::Affine;
+}
+
+
 use ark_ff::PrimeField;
-
-// pub fn from_u64<F: PrimeField>(val: u64) -> F {
-//     F::from_repr(F::Repr::from(val)).unwrap()
-// }
-
 // guassian elimination
 pub fn mat_inverse<F: PrimeField>(mat: &[Vec<F>]) -> Vec<Vec<F>> {
     let n = mat.len();

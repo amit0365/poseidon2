@@ -1,4 +1,5 @@
 # poseidon2
+Rust and Halo2 implementations of Poseidon2
 
 ## Acknowledgements
 
