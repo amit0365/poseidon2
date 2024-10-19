@@ -220,12 +220,6 @@ impl<F: PrimeField> Poseidon2<F> {
     }
 }
 
-// impl<F: PrimeField> MerkleTreeHash<F> for Poseidon2<F> {
-//     fn compress(&self, input: &[&F]) -> F {
-//         self.permutation(&[input[0].to_owned(), input[1].to_owned(), F::zero()])[0]
-//     }
-// }
-
 #[allow(unused_imports)]
 #[cfg(test)]
 mod poseidon2_tests_bn256 {
@@ -275,6 +269,27 @@ mod poseidon2_tests_bn256 {
     }
 }
 
+#[allow(unused_imports)]
+#[cfg(test)]
+mod poseidon2_tests_grumpkin {
+    use super::*;
+    use crate::{fields::{grumpkin::FpGrumpkin, utils::from_hex, utils::random_scalar}, plain::poseidon2_instance_grumpkin::POSEIDON2_GRUMPKIN_PARAMS};
+    use ark_ff::Field;
+
+    type Scalar = FpGrumpkin;
+
+    static TESTRUNS: usize = 5;
+
+    #[test]
+    fn mat_external8() {
+        let poseidon2 = Poseidon2::new(&POSEIDON2_GRUMPKIN_PARAMS);
+        let t = poseidon2.params.t;
+        let mut input = vec![Scalar::ZERO; t];
+        poseidon2.matmul_external(&mut input);
+        // let mat_internal = poseidon2.params.mat_internal;
+        // let mat_internal_diag_m_1 = poseidon2.params.mat_internal_diag_m_1;
+    }
+}
 // #[allow(unused_imports)]
 // #[cfg(test)]
 // mod poseidon2_tests_pallas {

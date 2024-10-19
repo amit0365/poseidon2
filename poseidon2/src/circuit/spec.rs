@@ -7,18 +7,19 @@ use ff::FromUniformBytes;
 use ff::PrimeField;
 use halo2_proofs::halo2curves::bn256::{Fq, Fr};
 use halo2_proofs::halo2curves::serde::SerdeObject;
-use super::primitives::Spec;
+use halo2_gadgets::poseidon::primitives::Spec;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PoseidonSpec;
 
+impl PoseidonSpec{}
+
 pub(crate) type Mat<F, const T: usize> = [[F; T]; T];
 
 impl<F> Spec<F, 3, 2> for PoseidonSpec
-where
-F: Ord + PrimeField + SerdeObject,
+    where
+    F: Ord + PrimeField,
 {
-// impl Spec<Fr, 3, 2> for PoseidonSpec {
     fn full_rounds() -> usize {
         8
     }
@@ -36,11 +37,105 @@ F: Ord + PrimeField + SerdeObject,
         unimplemented!()
     }
 
-    fn constants() -> (Vec<[F; 3]>, Mat<F, 3>, Mat<F, 3>) {
+    fn constants() -> (Vec<[F; 3]>, Mat<F, 3>, Mat<F, 3>, [F; 3]) {
         (
-            params::round_constants3()[..].to_vec(),
+            params::round_constants3(),
             params::mat_external3(),
             params::mat_internal3(),
+            params::mat_internal3_diag_m_1(),
+        )
+    }
+}
+
+impl<F> Spec<F, 8, 7> for PoseidonSpec
+    where
+    F: Ord + PrimeField,
+{
+    fn full_rounds() -> usize {
+        8
+    }
+
+    fn partial_rounds() -> usize {
+        56
+    }
+
+    fn sbox(val: F) -> F {
+        let val_sq = val.square();
+        val_sq * val_sq * val 
+    }
+
+    fn secure_mds() -> usize {
+        unimplemented!()
+    }
+
+    fn constants() -> (Vec<[F; 8]>, Mat<F, 8>, Mat<F, 8>, [F; 8]) {
+        (
+            params::round_constants8(),
+            params::mat_external8(),
+            params::mat_internal8(),
+            params::mat_internal8_diag_m_1(),
+        )
+    }
+}
+
+impl<F> Spec<F, 16, 15> for PoseidonSpec
+    where
+    F: Ord + PrimeField,
+{
+    fn full_rounds() -> usize {
+        8
+    }
+
+    fn partial_rounds() -> usize {
+        56
+    }
+
+    fn sbox(val: F) -> F {
+        let val_sq = val.square();
+        val_sq * val_sq * val 
+    }
+
+    fn secure_mds() -> usize {
+        unimplemented!()
+    }
+
+    fn constants() -> (Vec<[F; 16]>, Mat<F, 16>, Mat<F, 16>, [F; 16]) {
+        (
+            params::round_constants16(),
+            params::mat_external16(),
+            params::mat_internal16(),
+            params::mat_internal16_diag_m_1(),
+        )
+    }
+}
+
+impl<F> Spec<F, 4, 3> for PoseidonSpec
+    where
+    F: Ord + PrimeField,
+{
+    fn full_rounds() -> usize {
+        8
+    }
+
+    fn partial_rounds() -> usize {
+        56
+    }
+
+    fn sbox(val: F) -> F {
+        let val_sq = val.square();
+        val_sq * val_sq * val 
+    }
+
+    fn secure_mds() -> usize {
+        unimplemented!()
+    }
+
+    fn constants() -> (Vec<[F; 4]>, Mat<F, 4>, Mat<F, 4>, [F; 4]) {
+        (
+            params::round_constants4(),
+            params::mat_external4(),
+            params::mat_internal4(),    
+            params::mat_internal4_diag_m_1(),
         )
     }
 }

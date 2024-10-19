@@ -1,27 +1,29 @@
 use std::convert::TryInto;
 use std::iter;
 
+use ff::PrimeField;
 use halo2_proofs::{
     arithmetic::Field,
-    circuit::{AssignedCell, Cell, Chip, Layouter, Region, Value},
+    circuit::{Chip, Layouter, Region, Value},
     plonk::{
         Advice, Any, Column, ConstraintSystem, Constraints, Error, Expression, Fixed, Selector,
     },
     poly::Rotation,
 };
 
-pub const WIDTH_CHOICES: [usize; 8] = [2, 3, 4, 8, 12, 16, 20, 24];
-
-use super::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
-use super::utils::Var;
-use super::primitives::{Absorbing, Domain, Mds, Spec, Squeezing, State};
+use super::hash_chip::NUM_PARTIAL_SBOX;
+use halo2_gadgets::poseidon::{primitives::{Spec, VariableLength}, StateWord};
+use halo2_gadgets::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
+use halo2_gadgets::poseidon::primitives::{Absorbing, Domain, Mds, Squeezing, State};
 
 /// Configuration for a [`Pow5Chip`].
 #[derive(Clone, Debug)]
 pub struct Pow5Config<F: Field, const WIDTH: usize, const RATE: usize> {
     pub state: [Column<Advice>; WIDTH],
-    partial_sbox: Column<Advice>,
-    rc_a: [Column<Fixed>; WIDTH],
+    partial_sbox: [Column<Advice>; NUM_PARTIAL_SBOX],
+    partial_sbox_before: Column<Advice>,
+    rc_full_rounds: [Column<Fixed>; WIDTH],
+    rc_partial_rounds: [Column<Fixed>; NUM_PARTIAL_SBOX],
     pad_fixed: [Column<Fixed>; WIDTH],
     s_full: Selector,
     s_first: Selector,
@@ -34,18 +36,54 @@ pub struct Pow5Config<F: Field, const WIDTH: usize, const RATE: usize> {
     round_constants: Vec<[F; WIDTH]>,
     mat_external: Mds<F, WIDTH>,
     mat_internal: Mds<F, WIDTH>,
+    mat_internal_diag_m_1: [F; WIDTH],
 }
 
 /// A Poseidon chip using an $x^5$ S-Box.
 ///
 /// The chip is implemented using a single round per row for full rounds, and two rounds
 /// per row for partial rounds.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pow5Chip<F: Field, const WIDTH: usize, const RATE: usize> {
     config: Pow5Config<F, WIDTH, RATE>,
 }
 
-impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
+impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
+
+    pub fn matmul_m4_expr(input: &mut[Expression<F>]) {
+        let t4 = WIDTH / 4;
+        for i in 0..t4 {
+            let two = F::from(2);
+            let start_index = i * 4;
+            let mut t_0 = input[start_index].clone();
+            t_0 = t_0 + input[start_index + 1].clone();
+            let mut t_1 = input[start_index + 2].clone();
+            t_1 = t_1 + input[start_index + 3].clone();
+            let mut t_2 = input[start_index + 1].clone();
+            t_2 = t_2 * two;
+            t_2 = t_2 + t_1.clone();
+            let mut t_3 = input[start_index + 3].clone();
+            t_3 = t_3 * two;
+            t_3 = t_3 + t_0.clone();
+            let mut t_4 = t_1.clone();
+            t_4 = t_4 * two;
+            t_4 = t_4 * two;
+            t_4 = t_4 + t_3.clone();
+            let mut t_5 = t_0.clone();
+            t_5 = t_5 * two;
+            t_5 = t_5 * two;
+            t_5 = t_5 + t_2.clone();
+            let mut t_6 = t_3.clone();
+            t_6 = t_6 + t_5.clone();
+            let mut t_7 = t_2.clone();
+            t_7 = t_7 + t_4.clone();
+            input[start_index] = t_6;
+            input[start_index + 1] = t_5;
+            input[start_index + 2] = t_7;
+            input[start_index + 3] = t_4;
+        }
+    }
+        
     /// Configures this chip for use in a circuit.
     ///
     /// # Side-effects
@@ -58,8 +96,10 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
     pub fn configure<S: Spec<F, WIDTH, RATE>>(
         meta: &mut ConstraintSystem<F>,
         state: [Column<Advice>; WIDTH],
-        partial_sbox: Column<Advice>,
-        rc_a: [Column<Fixed>; WIDTH],
+        partial_sbox: [Column<Advice>; NUM_PARTIAL_SBOX],
+        partial_sbox_before: Column<Advice>,
+        rc_full_rounds: [Column<Fixed>; WIDTH],
+        rc_partial_rounds: [Column<Fixed>; NUM_PARTIAL_SBOX],
         pad_fixed: [Column<Fixed>; WIDTH],
     ) -> Pow5Config<F, WIDTH, RATE> {
         assert_eq!(RATE, WIDTH - 1);
@@ -69,7 +109,7 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
         assert!(S::partial_rounds() & 1 == 0);
         let half_full_rounds = S::full_rounds() / 2;
         let full_partial_rounds = S::partial_rounds();
-        let (round_constants, mat_external, mat_internal) = S::constants();
+        let (round_constants, mat_external, mat_internal, mat_internal_diag_m_1) = S::constants();
 
         // This allows state words to be initialized (by constraining them equal to fixed
         // values), and used in a permutation from an arbitrary region. rc_a is used in
@@ -94,6 +134,15 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
 
         meta.create_gate("first layer", |meta| {
             let s_first = meta.query_selector(s_first);
+            // let mut cur = (0..WIDTH).map(|i| meta.query_advice(state[i], Rotation::cur())).collect::<Vec<_>>();
+            // let next = (0..WIDTH).map(|i|meta.query_advice(state[i], Rotation::next())).collect::<Vec<_>>();
+            // Pow5Chip::<F, WIDTH, RATE>::matmul_m4_expr(&mut cur);
+            // Constraints::with_selector(
+            //     s_first,
+            //     std::iter::empty()
+            //         .chain((0..WIDTH).map(|idx| cur[idx].clone() - next[idx].clone()))
+            //         .collect::<Vec<_>>(),
+            // )
 
             Constraints::with_selector(
                 s_first,
@@ -124,7 +173,7 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
                         let expr = (0..WIDTH)
                             .map(|idx| {
                                 let state_cur = meta.query_advice(state[idx], Rotation::cur());
-                                let rc_a = meta.query_fixed(rc_a[idx], Rotation::cur());
+                                let rc_a = meta.query_fixed(rc_full_rounds[idx], Rotation::cur());
                                 pow_5(state_cur + rc_a) * mat_external[next_idx][idx]
                             })
                             .reduce(|acc, term| acc + term)
@@ -135,34 +184,74 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
             )
         });
 
+        //dup
+        // meta.create_gate("full rounds", |meta| {
+        //     let cur = (0..WIDTH).map(|i| meta.query_advice(state[i], Rotation::cur())).collect::<Vec<_>>();
+        //     let rc_a = (0..WIDTH).map(|i| meta.query_fixed(rc_full_rounds[i], Rotation::cur())).collect::<Vec<_>>();
+        //     let next = (0..WIDTH).map(|i|meta.query_advice(state[i], Rotation::next())).collect::<Vec<_>>();
+        //     let s_full = meta.query_selector(s_full);
+
+        //     let mut state = vec![Expression::Constant(F::ZERO); WIDTH];
+        //     for i in 0..WIDTH {
+        //         state[i] = pow_5(cur[i].clone() + rc_a[i].clone());
+        //     }
+
+        //     Pow5Chip::<F, WIDTH, RATE>::matmul_m4_expr(&mut state);
+
+        //     Constraints::with_selector(
+        //         s_full,
+        //         std::iter::empty()
+        //             .chain((0..WIDTH).map(|idx| state[idx].clone() - next[idx].clone()))
+        //             .collect::<Vec<_>>(),
+        //     )
+        // });
+
         meta.create_gate("partial rounds", |meta| {
+            let next = (0..WIDTH).map(|i|meta.query_advice(state[i], Rotation::next())).collect::<Vec<_>>();
             let cur_0 = meta.query_advice(state[0], Rotation::cur());
-            let mid_0 = meta.query_advice(partial_sbox, Rotation::cur());
-            let rc_a0 = meta.query_fixed(rc_a[0], Rotation::cur());
+            let mid_0 = (0..NUM_PARTIAL_SBOX).map(|i| meta.query_advice(partial_sbox[i], Rotation::cur())).collect::<Vec<_>>();
+            //let mid_before_last_0 = meta.query_advice(partial_sbox_before, Rotation::cur());
+            let rc_a = (0..NUM_PARTIAL_SBOX).map(|i| meta.query_fixed(rc_partial_rounds[i], Rotation::cur())).collect::<Vec<_>>();
             let s_partial = meta.query_selector(s_partial);
+            //matmul_internal
+            let mut sum = mid_0[0].clone(); // pow_5(rc[0] + state0)
+            let mut mid = vec![Expression::Constant(F::ZERO); WIDTH];
+            let mut mid_0_before_add = vec![Expression::Constant(F::ZERO); NUM_PARTIAL_SBOX];
+            let mut cur_vec = Vec::new();
+            cur_vec.push(mid_0[0].clone()); // replace the first elements as the partial sbox output mid_0
+            sum = (1..WIDTH).fold(sum, |acc, cur_idx| { //sum of t elements in the current state
+                let cur = meta.query_advice(state[cur_idx], Rotation::cur());
+                cur_vec.push(cur.clone());
+                acc + cur
+            });
+            for i in 0..WIDTH { // sum + diag entry * element to each element
+                mid[i] = sum.clone() + cur_vec[i].clone() * mat_internal_diag_m_1[i];
+            }
+            mid_0_before_add[0] = mid[0].clone();
 
-            use halo2_proofs::plonk::VirtualCells;
-            let mid = |idx: usize, meta: &mut VirtualCells<F>| {
-                let mid = mid_0.clone() * mat_internal[idx][0];
-                (1..WIDTH).fold(mid, |acc, cur_idx| {
-                    let cur = meta.query_advice(state[cur_idx], Rotation::cur());
-                    acc + cur * mat_internal[idx][cur_idx]
-                })
-            };
-
-            let next = |idx: usize, meta: &mut VirtualCells<F>| {
-                meta.query_advice(state[idx], Rotation::next())
-            };
-
-            let partial_round_linear = |idx: usize, meta: &mut VirtualCells<F>| {
-                mid(idx, meta)
-            };
+            for i in 1..NUM_PARTIAL_SBOX {
+                let mut sum = mid_0[i].clone(); // rc added to state0
+                sum = (1..WIDTH).fold(sum, |acc, cur_idx| {
+                    acc + mid[cur_idx].clone()
+                });
+                mid[0] = sum.clone() + mid_0[i].clone() * mat_internal_diag_m_1[0];
+                // if i == NUM_PARTIAL_SBOX - 1 {
+                //     mid_0_before_add[i] = mid_before_last_0.clone();
+                // } else {
+                //     mid_0_before_add[i] = mid[0].clone();
+                // }
+                mid_0_before_add[i] = mid[0].clone();
+                for j in 1..WIDTH {
+                    mid[j] = sum.clone() + mid[j].clone() * mat_internal_diag_m_1[j];
+                }
+            }
 
             Constraints::with_selector(
                 s_partial,
                 std::iter::empty()
-                    .chain(Some(pow_5(cur_0 + rc_a0) - mid_0.clone()))
-                    .chain((1..WIDTH).map(|idx| partial_round_linear(idx, meta) - next(idx, meta)))
+                    .chain(Some(pow_5(cur_0 + rc_a[0].clone()) - mid_0[0].clone()))
+                    .chain((1..NUM_PARTIAL_SBOX).map(|i| (pow_5(mid_0_before_add[i - 1].clone() + rc_a[i].clone())) - mid_0[i].clone()))
+                    .chain((0..WIDTH).map(|idx| mid[idx].clone() - next[idx].clone()))
                     .collect::<Vec<_>>(),
             )
         });
@@ -195,7 +284,9 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
         Pow5Config {
             state,
             partial_sbox,
-            rc_a,
+            partial_sbox_before,
+            rc_full_rounds,
+            rc_partial_rounds,
             pad_fixed,
             s_full,
             s_first,
@@ -207,6 +298,7 @@ impl<F: Field, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
             round_constants,
             mat_external,
             mat_internal,
+            mat_internal_diag_m_1,
         }
     }
 
@@ -247,30 +339,26 @@ impl<F: Field, S: Spec<F, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>
                 // Load the initial state into this region.
                 let state = Pow5State::load(&mut region, config, initial_state)?;
                 let state = state.first_layer(&mut region, config)?;
-                let state = (0..config.half_full_rounds).fold(Ok(state), |res, r| {
-                    res.and_then(|state| state.full_round(&mut region, config, r, r + 1))
+                let state = (0..config.half_full_rounds).try_fold(state, |state, r| {
+                    state.full_round(&mut region, config, r, r + 1)
+                })?;    
+
+                let state = (0..config.full_partial_rounds/NUM_PARTIAL_SBOX).try_fold(state, |state, r| {
+                    state.partial_round(
+                        &mut region,
+                        config,
+                        config.half_full_rounds + r,
+                        config.half_full_rounds + r + 1,
+                    )
                 })?;
 
-                let state = (0..config.full_partial_rounds).fold(Ok(state), |res, r| {
-                    res.and_then(|state| {
-                        state.partial_round(
-                            &mut region,
-                            config,
-                            config.half_full_rounds + r,
-                            config.half_full_rounds + r + 1,
-                        )
-                    })
-                })?;
-
-                let state = (0..config.half_full_rounds).fold(Ok(state), |res, r| {
-                    res.and_then(|state| {
-                        state.full_round(
-                            &mut region,
-                            config,
-                            config.half_full_rounds + config.full_partial_rounds + r,
-                            config.half_full_rounds + config.full_partial_rounds + r + 1,
-                        )
-                    })
+                let state = (0..config.half_full_rounds).try_fold(state, |state, r| {
+                    state.full_round(
+                        &mut region,
+                        config,
+                        config.half_full_rounds + config.full_partial_rounds/NUM_PARTIAL_SBOX + r,
+                        config.half_full_rounds + config.full_partial_rounds/NUM_PARTIAL_SBOX + r + 1,
+                    )
                 })?;
 
                 Ok(state.0)
@@ -410,29 +498,171 @@ impl<
     }
 }
 
-/// A word in the Poseidon state.
-#[derive(Clone, Debug)]
-pub struct StateWord<F: Field>(AssignedCell<F, F>);
+impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
 
-impl<F: Field> From<StateWord<F>> for AssignedCell<F, F> {
-    fn from(state_word: StateWord<F>) -> AssignedCell<F, F> {
-        state_word.0
+    pub fn initial_state(
+        &self,
+        mut layouter: impl Layouter<F>,
+    ) -> Result<State<StateWord<F>, WIDTH>, Error> {
+        let config = self.config();
+        let state = layouter.assign_region(
+            || format!("initial state for domain {}", VariableLength::<F, RATE>::name()),
+            |mut region| {
+                let mut state = Vec::with_capacity(WIDTH);
+                let mut load_state_word = |i: usize, value: F| -> Result<_, Error> {
+                    let var = region.assign_advice_from_constant(
+                        || format!("state_{i}"),
+                        config.state[i],
+                        0,
+                        value,
+                    )?;
+                    state.push(StateWord(var));
+
+                    Ok(())
+                };
+
+                for i in 0..RATE {
+                    load_state_word(i, F::ZERO)?;
+                }
+                load_state_word(RATE, VariableLength::<F, RATE>::initial_capacity_element())?;
+
+                Ok(state)
+            },
+        )?;
+
+        Ok(state.try_into().unwrap())
     }
-}
 
-impl<F: Field> From<AssignedCell<F, F>> for StateWord<F> {
-    fn from(cell_value: AssignedCell<F, F>) -> StateWord<F> {
-        StateWord(cell_value)
+    pub fn add_input(
+        &self,
+        mut layouter: impl Layouter<F>,
+        initial_state: &State<StateWord<F>, WIDTH>,
+        input: &[PaddedWord<F>; RATE],
+    ) -> Result<State<StateWord<F>, WIDTH>, Error> {
+        let config = self.config();
+        layouter.assign_region(
+            || format!("add input for domain {}", VariableLength::<F, RATE>::name()),
+            |mut region| {
+                config.s_pad_and_add.enable(&mut region, 1)?;
+
+                // Load the initial state into this region.
+                let load_state_word = |i: usize| {
+                    initial_state[i]
+                        .0
+                        .copy_advice(
+                            || format!("load state_{}", i),
+                            &mut region,
+                            config.state[i],
+                            0,
+                        )
+                        .map(StateWord)
+                };
+                let initial_state: Result<Vec<_>, Error> =
+                    (0..WIDTH).map(load_state_word).collect();
+                let initial_state = initial_state?;
+
+                // Load the input into this region.
+                let load_input_word = |i: usize| {
+                    let (cell, value) = match input[i].clone() {
+                        PaddedWord::Message(word) => (word.cell(), word.value().copied()),
+                        PaddedWord::Padding(padding_value) => {
+                            let cell = region
+                                .assign_fixed(
+                                    || format!("load pad_{}", i),
+                                    config.pad_fixed[i],
+                                    1,
+                                    || Value::known(padding_value),
+                                )?
+                                .cell();
+                            (cell, Value::known(padding_value))
+                        }
+                        _ => panic!("Input is not padded"),
+                    };
+                    
+                    let var = region.assign_advice(
+                        || format!("load input_{}", i),
+                        config.state[i],
+                        1,
+                        || value,
+                    )?;
+                    region.constrain_equal(cell, var.cell())?;
+
+                    Ok(StateWord(var))
+                };
+                let input: Result<Vec<_>, Error> = (0..RATE).map(load_input_word).collect();
+                let input = input?;
+
+                // Constrain the output.
+                let constrain_output_word = |i: usize| {
+                    let value = initial_state[i].0.value().copied()
+                        + input
+                            .get(i)
+                            .map(|word| word.0.value().cloned())
+                            // The capacity element is never altered by the input.
+                            .unwrap_or_else(|| Value::known(F::ZERO));
+                    region
+                        .assign_advice(
+                            || format!("load output_{}", i),
+                            config.state[i],
+                            2,
+                            || value,
+                        )
+                        .map(StateWord)
+                };
+                let output: Result<Vec<_>, Error> = (0..WIDTH).map(constrain_output_word).collect();
+                output.map(|output| output.try_into().unwrap())
+            },
+        )
     }
-}
 
-impl<F: Field> Var<F> for StateWord<F> {
-    fn cell(&self) -> Cell {
-        self.0.cell()
+    fn get_output(state: &State<StateWord<F>, WIDTH>) -> Squeezing<StateWord<F>, RATE> {
+        Squeezing(
+            state[..RATE]
+                .iter()
+                .map(|word| Some(word.clone()))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
     }
 
-    fn value(&self) -> Value<F> {
-        self.0.value().cloned()
+    pub fn permutation(
+        &self,
+        mut layouter: impl Layouter<F>,
+        initial_state: &State<StateWord<F>, WIDTH>,
+    ) -> Result<State<StateWord<F>, WIDTH>, Error> {
+        let config = self.config();
+        layouter.assign_region(
+            || "permute state",
+            |mut region| {
+                // Load the initial state into this region.
+                let state = Pow5State::load(&mut region, config, initial_state)?;
+                let state = state.first_layer(&mut region, config)?;
+                let state = (0..config.half_full_rounds).try_fold(state, |state, r| {
+                    state.full_round(&mut region, config, r, r + 1)
+                })?;    
+
+                let state = (0..config.full_partial_rounds/NUM_PARTIAL_SBOX).try_fold(state, |state, r| {
+                    state.partial_round(
+                        &mut region,
+                        config,
+                        config.half_full_rounds + r,
+                        config.half_full_rounds + r + 1,
+                    )
+                })?;
+
+                let state = (0..config.half_full_rounds).try_fold(state, |state, r| {
+                    state.full_round(
+                        &mut region,
+                        config,
+                        config.half_full_rounds + config.full_partial_rounds/NUM_PARTIAL_SBOX + r,
+                        config.half_full_rounds + config.full_partial_rounds/NUM_PARTIAL_SBOX + r + 1,
+                    )
+                })?;
+
+                Ok(state.0)
+            },
+        )
     }
 }
 
@@ -440,6 +670,142 @@ impl<F: Field> Var<F> for StateWord<F> {
 struct Pow5State<F: Field, const WIDTH: usize>([StateWord<F>; WIDTH]);
 
 impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
+
+    pub fn matmul_m4(&self, input: &mut[F]) {
+        let t4 = WIDTH / 4;
+        for i in 0..t4 {
+            let start_index = i * 4;
+            let mut t_0 = input[start_index];
+            t_0.add_assign(&input[start_index + 1]);
+            let mut t_1 = input[start_index + 2];
+            t_1.add_assign(&input[start_index + 3]);
+            let mut t_2 = input[start_index + 1];
+            t_2 = t_2.double();
+            t_2.add_assign(&t_1);
+            let mut t_3 = input[start_index + 3];
+            t_3 = t_3.double();
+            t_3.add_assign(&t_0);
+            let mut t_4 = t_1;
+            t_4 = t_4.double();
+            t_4 = t_4.double();
+            t_4.add_assign(&t_3);
+            let mut t_5 = t_0;
+            t_5 = t_5.double();
+            t_5 = t_5.double();
+            t_5.add_assign(&t_2);
+            let mut t_6 = t_3;
+            t_6.add_assign(&t_5);
+            let mut t_7 = t_2;
+            t_7.add_assign(&t_4);
+            input[start_index] = t_6;
+            input[start_index + 1] = t_5;
+            input[start_index + 2] = t_7;
+            input[start_index + 3] = t_4;
+        }
+    }
+
+    pub fn matmul_external(&self, input: &mut[F]) {
+        let t = WIDTH;
+        match t {
+            2 => {
+                // Matrix circ(2, 1)
+                let mut sum = input[0];
+                sum.add_assign(&input[1]);
+                input[0].add_assign(&sum);
+                input[1].add_assign(&sum);
+            }
+            3 => {
+                // Matrix circ(2, 1, 1)
+                let mut sum = input[0];
+                sum.add_assign(&input[1]);
+                sum.add_assign(&input[2]);
+                input[0].add_assign(&sum);
+                input[1].add_assign(&sum);
+                input[2].add_assign(&sum);
+            }
+            4 => {
+                // Applying cheap 4x4 MDS matrix to each 4-element part of the state
+                self.matmul_m4(input);
+            }
+            8 | 12 | 16 | 20 | 24 => {
+                // Applying cheap 4x4 MDS matrix to each 4-element part of the state
+                self.matmul_m4(input);
+
+                // Applying second cheap matrix for t > 4
+                let t4 = t / 4;
+                let mut stored = [F::ZERO; 4];
+                for l in 0..4 {
+                    stored[l] = input[l];
+                    for j in 1..t4 {
+                        stored[l].add_assign(&input[4 * j + l]);
+                    }
+                }
+                for i in 0..input.len() {
+                    input[i].add_assign(&stored[i % 4]);
+                }
+            }
+            _ => {
+                panic!()
+            }
+        }
+    }
+
+    pub fn matmul_internal(&self, input: &mut[F], mat_internal_diag_m_1: &[F]) {
+        let t = WIDTH;
+
+        match t {
+            2 => {
+                // [2, 1]
+                // [1, 3]
+                let mut sum = input[0];
+                sum.add_assign(&input[1]);
+                input[0].add_assign(&sum);
+                input[1].double();
+                input[1].add_assign(&sum);
+            }
+            3 => {
+                // [2, 1, 1]
+                // [1, 2, 1]
+                // [1, 1, 3]
+                let mut sum = input[0];
+                sum.add_assign(&input[1]);
+                sum.add_assign(&input[2]);
+                input[0].add_assign(&sum);
+                input[1].add_assign(&sum);
+                input[2].double();
+                input[2].add_assign(&sum);
+            }
+            4 | 8 | 12 | 16 | 20 | 24 => {
+                // Compute input sum
+                let mut sum = input[0];
+                input
+                    .iter()
+                    .skip(1)
+                    .take(t-1)
+                    .for_each(|el| sum.add_assign(el));
+                // Add sum + diag entry * element to each element
+                for i in 0..input.len() {
+                    input[i].mul_assign(&mat_internal_diag_m_1[i]);
+                    input[i].add_assign(&sum);
+                }
+            }
+            _ => {
+                panic!()
+            }
+        }
+    }
+
+    fn add_rc(&self, input: &[F], rc: &[F]) -> Vec<F> {
+        input
+            .iter()
+            .zip(rc.iter())
+            .map(|(a, b)| {
+                let mut r = *a;
+                r.add_assign(b);
+                r
+            })
+            .collect()
+    }
 
     fn load<const RATE: usize>(
         region: &mut Region<F>,
@@ -469,17 +835,14 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
                     .value()
                     .map(|v| *v)
             });
-            let r: Value<Vec<F>> = q.collect();
-            let m = &config.mat_external;
-            let state = m.iter().map(|m_i| {
-                r.as_ref().map(|r| {
-                    r.iter()
-                        .enumerate()
-                        .fold(F::ZERO, |acc, (j, r_j)| acc + m_i[j] * r_j)
-                })
+
+            let mut state_raw = [F::ZERO; WIDTH];
+            q.enumerate().for_each(|(idx, q)| {
+                q.map(|q| state_raw[idx] = q);
             });
 
-            let state: [Value<F>; WIDTH] = state.collect::<Vec<_>>().try_into().unwrap();
+            self.matmul_external(&mut state_raw);
+            let state: [Value<F>; WIDTH] = state_raw.iter().map(|el| Value::known(*el)).collect::<Vec<_>>().try_into().unwrap();
             let next_state_word = |i: usize| {
                 let value = state[i];
                 let var = region.assign_advice(
@@ -495,6 +858,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             next_state.map(|next_state| Pow5State(next_state.try_into().unwrap()))
     }
 
+    // mockprover fails here check constraints
     fn full_round<const RATE: usize>(
         self,
         region: &mut Region<F>,
@@ -502,23 +866,23 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         round: usize,
         offset: usize,
     ) -> Result<Self, Error> {
-        Self::round(region, config, round, offset, config.s_full, |_| {
+        Self::full_round_fn(region, config, round, offset, config.s_full, |_| {
             let q = self.0.iter().enumerate().map(|(idx, word)| {
                 word.0
                     .value()
                     .map(|v| *v + config.round_constants[round][idx])
             });
-            let r: Value<Vec<F>> = q.map(|q| q.map(|q| q.pow(config.alpha))).collect();
-            let m = &config.mat_external;
-            let state = m.iter().map(|m_i| {
-                r.as_ref().map(|r| {
-                    r.iter()
-                        .enumerate()
-                        .fold(F::ZERO, |acc, (j, r_j)| acc + m_i[j] * r_j)
-                })
+            let mut state = [F::ZERO; WIDTH];
+            q.enumerate().for_each(|(idx, q)| {
+                q.map(|q| {
+                    let q_sq = q.square();
+                    let q_5 = q_sq * q_sq * q;
+                    state[idx] = q_5;
+                });
             });
 
-            Ok((round + 1, state.collect::<Vec<_>>().try_into().unwrap()))
+            self.matmul_external(&mut state);
+            Ok((round + 1, state.iter().map(|el| Value::known(*el)).collect::<Vec<_>>().try_into().unwrap()))
         })
     }
 
@@ -529,12 +893,12 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         round: usize,
         offset: usize,
     ) -> Result<Self, Error> {
-        Self::round(region, config, round, offset, config.s_partial, |region| {
-            let m = &config.mat_internal;
+        Self::partial_round_fn(region, config, round, offset, config.s_partial, |region| {
             let p: Value<Vec<_>> = self.0.iter().map(|word| word.0.value().cloned()).collect();
-
             let r: Value<Vec<_>> = p.map(|p| {
-                let r_0 = (p[0] + config.round_constants[round][0]).pow(config.alpha);
+                let r_add = p[0] + config.round_constants[4 * (round - 3)][0];
+                let r_sq = r_add.square();
+                let r_0 = r_sq * r_sq * r_add;
                 let r_i = p[1..]
                     .iter()
                     .copied();
@@ -542,28 +906,52 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             });
 
             region.assign_advice(
-                || format!("round_{} partial_sbox", round),
-                config.partial_sbox,
+                || format!("round_{} partial_sbox", 4*round),
+                config.partial_sbox[0],
                 offset,
                 || r.as_ref().map(|r| r[0]),
             )?;
+            
+            let mut state = [F::ZERO; WIDTH];
+            r.as_ref().map(|r| {
+                state[..WIDTH].copy_from_slice(&r[..WIDTH]);
+            });
+            self.matmul_internal(&mut state, &config.mat_internal_diag_m_1);
 
-            let state: Vec<Value<_>> = m
-                .iter()
-                .map(|m_i| {
-                    r.as_ref().map(|r| {
-                        m_i.iter()
-                            .zip(r.iter())
-                            .fold(F::ZERO, |acc, (m_ij, r_j)| acc + *m_ij * r_j)
-                    })
-                })
-                .collect();
+            for i in 1..NUM_PARTIAL_SBOX {
+                // if i == NUM_PARTIAL_SBOX - 1 {
+                //     region.assign_advice(
+                //         || format!("round_{} partial_sbox_before", 4*round + i),
+                //         config.partial_sbox_before,
+                //         offset,
+                //         || Value::known(state[0]),
+                //     )?;
+                // }
 
-            Ok((round + 1, state.try_into().unwrap()))
+                let ri_add = state[0] + config.round_constants[4 * (round - 3) + i][0];
+                let ri_sq = ri_add.square();
+                let ri_0 = ri_sq * ri_sq * ri_add;
+                let ri_i = state[1..]
+                    .iter()
+                    .copied();
+                let ri: Vec<_> = std::iter::empty().chain(Some(ri_0)).chain(ri_i).collect();
+
+                region.assign_advice(
+                    || format!("round_{} partial_sbox", 4*round + i),
+                    config.partial_sbox[i],
+                    offset,
+                    || Value::known(ri[0]),
+                )?;
+
+                state = ri.try_into().unwrap();
+                self.matmul_internal(&mut state, &config.mat_internal_diag_m_1);
+            }
+
+            Ok((round + 1, state.iter().map(|el| Value::known(*el)).collect::<Vec<_>>().try_into().unwrap()))
         })
     }
 
-    fn round<const RATE: usize>(
+    fn full_round_fn<const RATE: usize>(
         region: &mut Region<F>,
         config: &Pow5Config<F, WIDTH, RATE>,
         round: usize,
@@ -577,7 +965,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         let mut load_round_constant = |i: usize| {
             region.assign_fixed(
                 || format!("round_{} rc_{}", round, i),
-                config.rc_a[i],
+                config.rc_full_rounds[i],
                 offset,
                 || Value::known(config.round_constants[round][i]),
             )
@@ -585,6 +973,43 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         for i in 0..WIDTH {
             load_round_constant(i)?;
         }
+
+        // Compute the next round's state.
+        let (next_round, next_state) = round_fn(region)?;
+        let next_state_word = |i: usize| {
+            let value = next_state[i];
+            let var = region.assign_advice(
+                || format!("round_{} state_{}", next_round, i),
+                config.state[i],
+                offset + 1,
+                || value,
+            )?;
+            Ok(StateWord(var))
+        };
+
+        let next_state: Result<Vec<_>, _> = (0..WIDTH).map(next_state_word).collect();
+        next_state.map(|next_state| Pow5State(next_state.try_into().unwrap()))
+    }
+
+    fn partial_round_fn<const RATE: usize>(
+        region: &mut Region<F>,
+        config: &Pow5Config<F, WIDTH, RATE>,
+        round: usize,
+        offset: usize,
+        round_gate: Selector,
+        round_fn: impl FnOnce(&mut Region<F>) -> Result<(usize, [Value<F>; WIDTH]), Error>,
+    ) -> Result<Self, Error> {
+        // Enable the required gate.
+        round_gate.enable(region, offset)?;
+        for j in 0..NUM_PARTIAL_SBOX {
+            // Load the round constants.
+                region.assign_fixed(
+                    || format!("round_{} rc_{}", 4*(round - 3) + j, 0),
+                    config.rc_partial_rounds[j],
+                    offset,
+                    || Value::known(config.round_constants[4*(round - 3) + j][0]),
+                )?;
+            };
 
         // Compute the next round's state.
         let (next_round, next_state) = round_fn(region)?;
@@ -605,139 +1030,24 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use group::ff::{Field, PrimeField};
-    use halo2_proofs::{
-        circuit::{Layouter, SimpleFloorPlanner, Value},
-        dev::MockProver,
-        plonk::{Circuit, ConstraintSystem, Error},
-    };
-    use halo2_proofs::halo2curves::bn256::{Fq as Fp};
-    //use rand::rngs::OsRng;
+// #[cfg(test)]
+// mod tests {
+//     use group::ff::{Field, PrimeField};
+//     use halo2_proofs::{
+//         circuit::{Layouter, SimpleFloorPlanner, Value},
+//         dev::MockProver,
+//         plonk::{Circuit, ConstraintSystem, Error},
+//     };
+//     use halo2_proofs::halo2curves::bn256::{Fq as Fp};
+//     //use rand::rngs::OsRng;
 
-    use crate::circuit::spec::PoseidonSpec;
+//     use crate::circuit::spec::PoseidonSpec;
 
-    use super::{PoseidonInstructions, Pow5Chip, Pow5Config, StateWord};
-    use super::super::primitives::{self as poseidon, ConstantLength, Spec}; // P128Pow5T3 as OrchardNullifier
-    use std::convert::TryInto;
-    use std::marker::PhantomData;
-
-    struct PermuteCircuit<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize>(
-        PhantomData<S>,
-    );
-
-    impl<S: Spec<Fp, WIDTH, RATE>, const WIDTH: usize, const RATE: usize> Circuit<Fp>
-        for PermuteCircuit<S, WIDTH, RATE>
-    {
-        type Config = Pow5Config<Fp, WIDTH, RATE>;
-        type FloorPlanner = SimpleFloorPlanner;
-        type Params = ();
-
-        fn without_witnesses(&self) -> Self {
-            PermuteCircuit::<S, WIDTH, RATE>(PhantomData)
-        }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Pow5Config<Fp, WIDTH, RATE> {
-            let state = (0..WIDTH).map(|_| meta.advice_column()).collect::<Vec<_>>();
-            let partial_sbox = meta.advice_column();
-
-            let rc_a = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
-            let pad_fixed = (0..WIDTH).map(|_| meta.fixed_column()).collect::<Vec<_>>();
-
-            Pow5Chip::configure::<S>(
-                meta,
-                state.try_into().unwrap(),
-                partial_sbox,
-                rc_a.try_into().unwrap(),
-                pad_fixed.try_into().unwrap(),
-            )
-        }
-
-        fn synthesize(
-            &self,
-            config: Pow5Config<Fp, WIDTH, RATE>,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let initial_state = layouter.assign_region(
-                || "prepare initial state",
-                |mut region| {
-                    let state_word = |i: usize| {
-                        let value = Value::known(Fp::from(i as u64));
-                        let var = region.assign_advice(
-                            || format!("load state_{}", i),
-                            config.state[i],
-                            0,
-                            || value,
-                        )?;
-                        Ok(StateWord(var))
-                    };
-
-                    let state: Result<Vec<_>, Error> = (0..WIDTH).map(state_word).collect();
-                    Ok(state?.try_into().unwrap())
-                },
-            )?;
-
-            let chip = Pow5Chip::construct(config.clone());
-            let final_state = <Pow5Chip<_, WIDTH, RATE> as PoseidonInstructions<
-                Fp,
-                S,
-                WIDTH,
-                RATE,
-            >>::permute(&chip, &mut layouter, &initial_state)?;
-
-            // For the purpose of this test, compute the real final state inline.
-            let mut expected_final_state = (0..WIDTH)
-                .map(|idx| Fp::from(idx as u64))
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap();
-
-            poseidon::permute::<_, S, WIDTH, RATE>(
-                &mut expected_final_state
-            );
-
-            layouter.assign_region(
-                || "constrain final state",
-                |mut region| {
-                    let mut final_state_word = |i: usize| {
-                        let var = region.assign_advice(
-                            || format!("load final_state_{}", i),
-                            config.state[i],
-                            0,
-                            || Value::known(expected_final_state[i]),
-                        )?;
-                        region.constrain_equal(final_state[i].0.cell(), var.cell())
-                    };
-
-                    for i in 0..(WIDTH) {
-                        final_state_word(i)?;
-                    }
-
-                    Ok(())
-                },
-            )
-        }
-    }
-
-    #[test]
-    fn poseidon_permute() {
-
-        use plotters::prelude::*;
-        let root = BitMapBackend::new("Poseidon2Chip.png", (1024, 3096)).into_drawing_area();
-        root.fill(&WHITE).unwrap();
-        let root = root.titled("Poseidon2Chip", ("sans-serif", 60)).unwrap();
-            
-        let k = 7;
-        let circuit = PermuteCircuit::<PoseidonSpec, 3, 2>(PhantomData);
-
-        halo2_proofs::dev::CircuitLayout::default()
-        .render(k, &circuit, &root)
-        .unwrap();
-
-        let prover = MockProver::run(k, &circuit, vec![]).unwrap();
-        assert_eq!(prover.verify(), Ok(()))
-    }
+//     use super::{PoseidonInstructions, Pow5Chip, Pow5Config, StateWord};
+//     use super::super::primitives::{self as poseidon, ConstantLength}; // P128Pow5T3 as OrchardNullifier
+//     use std::convert::TryInto;
+//     use std::marker::PhantomData;
+//     use halo2_gadgets::poseidon::primitives::Spec;
 
     // struct HashCircuit<
     //     S: Spec<Fp, WIDTH, RATE>,
@@ -928,4 +1238,4 @@ mod tests {
 //             .unwrap();
 //     }
 // }
-}
+//}

@@ -12,6 +12,7 @@ hex = "0.4"
 serde = "1.0"
 lazy_static = "1.4"
 cfg-if = "1.0"
+num-bigint = "0.4.3"
 # for sinsemilla:
 ff = "0.13"
 group = "0.13"
@@ -25,9 +26,11 @@ group_ped = { package = "group", version = "0.12.1", features = ["wnaf-memuse"] 
 bitvec = "1.0"
 byteorder = "1.4"
 halo2_proofs = { git = "https://github.com/amit0365/halo2.git", package="halo2_proofs", branch = "protostar"}
+halo2_gadgets = { git = "https://github.com/amit0365/halo2.git", package="halo2_gadgets", branch = "protostar"}
 
 [dev-dependencies]
 criterion = "0.4"
+pprof = { version = "0.11.0", features = ["criterion", "flamegraph"] }
 
 [features]
 default = ["dev-graph"]

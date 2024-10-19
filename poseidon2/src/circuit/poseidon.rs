@@ -11,58 +11,61 @@ use halo2_proofs::{
     plonk::Error,
 };
 
-use super::primitives::{Absorbing, ConstantLength, Domain, Spec, SpongeMode, Squeezing, State};
+//use super::primitives::{Absorbing, ConstantLength, Domain, SpongeMode, Squeezing, State};
+use halo2_gadgets::poseidon::primitives::Spec;
+use halo2_gadgets::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
+use halo2_gadgets::poseidon::primitives::{Absorbing, ConstantLength, Domain, SpongeMode, Squeezing, State};
 
-/// A word from the padded input to a Poseidon sponge.
-#[derive(Clone, Debug)]
-pub enum PaddedWord<F: Field> {
-    /// A message word provided by the prover.
-    Message(AssignedCell<F, F>),
-    /// A padding word, that will be fixed in the circuit parameters.
-    Padding(F),
-}
+// /// A word from the padded input to a Poseidon sponge.
+// #[derive(Clone, Debug)]
+// pub enum PaddedWord<F: Field> {
+//     /// A message word provided by the prover.
+//     Message(AssignedCell<F, F>),
+//     /// A padding word, that will be fixed in the circuit parameters.
+//     Padding(F),
+// }
 
-/// The set of circuit instructions required to use the Poseidon permutation.
-pub trait PoseidonInstructions<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>:
-    Chip<F>
-{
-    /// Variable representing the word over which the Poseidon permutation operates.
-    type Word: Clone + fmt::Debug + From<AssignedCell<F, F>> + Into<AssignedCell<F, F>>;
+// /// The set of circuit instructions required to use the Poseidon permutation.
+// pub trait PoseidonInstructions<F: Field, S: Spec<F, T, RATE>, const T: usize, const RATE: usize>:
+//     Chip<F>
+// {
+//     /// Variable representing the word over which the Poseidon permutation operates.
+//     type Word: Clone + fmt::Debug + From<AssignedCell<F, F>> + Into<AssignedCell<F, F>>;
 
-    /// Applies the Poseidon permutation to the given state.
-    fn permute(
-        &self,
-        layouter: &mut impl Layouter<F>,
-        initial_state: &State<Self::Word, T>,
-    ) -> Result<State<Self::Word, T>, Error>;
-}
+//     /// Applies the Poseidon permutation to the given state.
+//     fn permute(
+//         &self,
+//         layouter: &mut impl Layouter<F>,
+//         initial_state: &State<Self::Word, T>,
+//     ) -> Result<State<Self::Word, T>, Error>;
+// }
 
-/// The set of circuit instructions required to use the [`Sponge`] and [`Hash`] gadgets.
-///
-/// [`Hash`]: self::Hash
-pub trait PoseidonSpongeInstructions<
-    F: Field,
-    S: Spec<F, T, RATE>,
-    D: Domain<F, RATE>,
-    const T: usize,
-    const RATE: usize,
->: PoseidonInstructions<F, S, T, RATE>
-{
-    /// Returns the initial empty state for the given domain.
-    fn initial_state(&self, layouter: &mut impl Layouter<F>)
-        -> Result<State<Self::Word, T>, Error>;
+// /// The set of circuit instructions required to use the [`Sponge`] and [`Hash`] gadgets.
+// ///
+// /// [`Hash`]: self::Hash
+// pub trait PoseidonSpongeInstructions<
+//     F: Field,
+//     S: Spec<F, T, RATE>,
+//     D: Domain<F, RATE>,
+//     const T: usize,
+//     const RATE: usize,
+// >: PoseidonInstructions<F, S, T, RATE>
+// {
+//     /// Returns the initial empty state for the given domain.
+//     fn initial_state(&self, layouter: &mut impl Layouter<F>)
+//         -> Result<State<Self::Word, T>, Error>;
 
-    /// Adds the given input to the state.
-    fn add_input(
-        &self,
-        layouter: &mut impl Layouter<F>,
-        initial_state: &State<Self::Word, T>,
-        input: &Absorbing<PaddedWord<F>, RATE>,
-    ) -> Result<State<Self::Word, T>, Error>;
+//     /// Adds the given input to the state.
+//     fn add_input(
+//         &self,
+//         layouter: &mut impl Layouter<F>,
+//         initial_state: &State<Self::Word, T>,
+//         input: &Absorbing<PaddedWord<F>, RATE>,
+//     ) -> Result<State<Self::Word, T>, Error>;
 
-    /// Extracts sponge output from the given state.
-    fn get_output(state: &State<Self::Word, T>) -> Squeezing<Self::Word, RATE>;
-}
+//     /// Extracts sponge output from the given state.
+//     fn get_output(state: &State<Self::Word, T>) -> Squeezing<Self::Word, RATE>;
+// }
 
 /// A word over which the Poseidon permutation operates.
 #[derive(Debug)]
