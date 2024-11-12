@@ -121,8 +121,8 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             meta.enable_equality(column);
         }
 
-        let s_full = meta.selector();
         let s_first = meta.selector();
+        let s_full = meta.selector();
         let s_partial = meta.selector();
         let s_pad_and_add = meta.selector();
 
@@ -131,19 +131,21 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             let v2 = v.clone() * v.clone();
             v2.clone() * v2 * v
         };
+        let pow_4 = |v: Expression<F>| {
+            let v2 = v.clone() * v.clone();
+            v2.clone() * v2
+        };
+        let pow_3 = |v: Expression<F>| {
+            let v2 = v.clone() * v.clone();
+            v2.clone() * v
+        };
+        let pow_2 = |v: Expression<F>| {
+            v.clone() * v.clone()
+        };
 
         meta.create_gate("first layer", |meta| {
             let s_first = meta.query_selector(s_first);
-            // let mut cur = (0..WIDTH).map(|i| meta.query_advice(state[i], Rotation::cur())).collect::<Vec<_>>();
-            // let next = (0..WIDTH).map(|i|meta.query_advice(state[i], Rotation::next())).collect::<Vec<_>>();
-            // Pow5Chip::<F, WIDTH, RATE>::matmul_m4_expr(&mut cur);
-            // Constraints::with_selector(
-            //     s_first,
-            //     std::iter::empty()
-            //         .chain((0..WIDTH).map(|idx| cur[idx].clone() - next[idx].clone()))
-            //         .collect::<Vec<_>>(),
-            // )
-
+            
             Constraints::with_selector(
                 s_first,
                 (0..WIDTH)
@@ -210,10 +212,10 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             let next = (0..WIDTH).map(|i|meta.query_advice(state[i], Rotation::next())).collect::<Vec<_>>();
             let cur_0 = meta.query_advice(state[0], Rotation::cur());
             let mid_0 = (0..NUM_PARTIAL_SBOX).map(|i| meta.query_advice(partial_sbox[i], Rotation::cur())).collect::<Vec<_>>();
-            //let mid_before_last_0 = meta.query_advice(partial_sbox_before, Rotation::cur());
+            let mid_before_last_0 = meta.query_advice(partial_sbox_before, Rotation::cur());
             let rc_a = (0..NUM_PARTIAL_SBOX).map(|i| meta.query_fixed(rc_partial_rounds[i], Rotation::cur())).collect::<Vec<_>>();
             let s_partial = meta.query_selector(s_partial);
-            //matmul_internal
+            // matmul_internal
             let mut sum = mid_0[0].clone(); // pow_5(rc[0] + state0)
             let mut mid = vec![Expression::Constant(F::ZERO); WIDTH];
             let mut mid_0_before_add = vec![Expression::Constant(F::ZERO); NUM_PARTIAL_SBOX];
@@ -230,17 +232,17 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             mid_0_before_add[0] = mid[0].clone();
 
             for i in 1..NUM_PARTIAL_SBOX {
-                let mut sum = mid_0[i].clone(); // rc added to state0
+                let mut sum = mid_0[i].clone(); // pow5(rc0 + state0)
                 sum = (1..WIDTH).fold(sum, |acc, cur_idx| {
                     acc + mid[cur_idx].clone()
                 });
                 mid[0] = sum.clone() + mid_0[i].clone() * mat_internal_diag_m_1[0];
-                // if i == NUM_PARTIAL_SBOX - 1 {
-                //     mid_0_before_add[i] = mid_before_last_0.clone();
-                // } else {
-                //     mid_0_before_add[i] = mid[0].clone();
-                // }
-                mid_0_before_add[i] = mid[0].clone();
+                if i >= NUM_PARTIAL_SBOX - 2 {
+                    mid_0_before_add[i] = mid_before_last_0.clone();
+                } else {
+                    mid_0_before_add[i] = mid[0].clone();
+                }
+                // mid_0_before_add[i] = mid[0].clone();
                 for j in 1..WIDTH {
                     mid[j] = sum.clone() + mid[j].clone() * mat_internal_diag_m_1[j];
                 }
@@ -250,7 +252,7 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
                 s_partial,
                 std::iter::empty()
                     .chain(Some(pow_5(cur_0 + rc_a[0].clone()) - mid_0[0].clone()))
-                    .chain((1..NUM_PARTIAL_SBOX).map(|i| (pow_5(mid_0_before_add[i - 1].clone() + rc_a[i].clone())) - mid_0[i].clone()))
+                    .chain((1..NUM_PARTIAL_SBOX).map(|i| pow_5(mid_0_before_add[i - 1].clone() + rc_a[i].clone()) - mid_0[i].clone()))
                     .chain((0..WIDTH).map(|idx| mid[idx].clone() - next[idx].clone()))
                     .collect::<Vec<_>>(),
             )
@@ -499,7 +501,6 @@ impl<
 }
 
 impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RATE> {
-
     pub fn initial_state(
         &self,
         mut layouter: impl Layouter<F>,
@@ -670,7 +671,6 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
 struct Pow5State<F: Field, const WIDTH: usize>([StateWord<F>; WIDTH]);
 
 impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
-
     pub fn matmul_m4(&self, input: &mut[F]) {
         let t4 = WIDTH / 4;
         for i in 0..t4 {
@@ -896,7 +896,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         Self::partial_round_fn(region, config, round, offset, config.s_partial, |region| {
             let p: Value<Vec<_>> = self.0.iter().map(|word| word.0.value().cloned()).collect();
             let r: Value<Vec<_>> = p.map(|p| {
-                let r_add = p[0] + config.round_constants[4 * (round - 3)][0];
+                let r_add = p[0] + config.round_constants[NUM_PARTIAL_SBOX * (round - 3)][0];
                 let r_sq = r_add.square();
                 let r_0 = r_sq * r_sq * r_add;
                 let r_i = p[1..]
@@ -906,7 +906,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             });
 
             region.assign_advice(
-                || format!("round_{} partial_sbox", 4*round),
+                || format!("round_{} partial_sbox", NUM_PARTIAL_SBOX*round),
                 config.partial_sbox[0],
                 offset,
                 || r.as_ref().map(|r| r[0]),
@@ -919,16 +919,16 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
             self.matmul_internal(&mut state, &config.mat_internal_diag_m_1);
 
             for i in 1..NUM_PARTIAL_SBOX {
-                // if i == NUM_PARTIAL_SBOX - 1 {
-                //     region.assign_advice(
-                //         || format!("round_{} partial_sbox_before", 4*round + i),
-                //         config.partial_sbox_before,
-                //         offset,
-                //         || Value::known(state[0]),
-                //     )?;
-                // }
+                if i == NUM_PARTIAL_SBOX - 1 {
+                    region.assign_advice(
+                        || format!("round_{} partial_sbox_before", 4*round + i),
+                        config.partial_sbox_before,
+                        offset,
+                        || Value::known(state[0]),
+                    )?;
+                }
 
-                let ri_add = state[0] + config.round_constants[4 * (round - 3) + i][0];
+                let ri_add = state[0] + config.round_constants[NUM_PARTIAL_SBOX * (round - 3) + i][0];
                 let ri_sq = ri_add.square();
                 let ri_0 = ri_sq * ri_sq * ri_add;
                 let ri_i = state[1..]
@@ -937,7 +937,7 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
                 let ri: Vec<_> = std::iter::empty().chain(Some(ri_0)).chain(ri_i).collect();
 
                 region.assign_advice(
-                    || format!("round_{} partial_sbox", 4*round + i),
+                    || format!("round_{} partial_sbox", NUM_PARTIAL_SBOX * round + i),
                     config.partial_sbox[i],
                     offset,
                     || Value::known(ri[0]),
@@ -1004,10 +1004,10 @@ impl<F: Field, const WIDTH: usize> Pow5State<F, WIDTH> {
         for j in 0..NUM_PARTIAL_SBOX {
             // Load the round constants.
                 region.assign_fixed(
-                    || format!("round_{} rc_{}", 4*(round - 3) + j, 0),
+                    || format!("round_{} rc_{}", NUM_PARTIAL_SBOX * (round - 3) + j, 0),
                     config.rc_partial_rounds[j],
                     offset,
-                    || Value::known(config.round_constants[4*(round - 3) + j][0]),
+                    || Value::known(config.round_constants[NUM_PARTIAL_SBOX * (round - 3) + j][0]),
                 )?;
             };
 

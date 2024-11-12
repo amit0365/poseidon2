@@ -18,15 +18,11 @@ use halo2_proofs::{
     halo2curves::{bn256::{self, Fq as Fp}, grumpkin},
     plonk::{Advice, Column, ConstraintSystem, Error, Fixed, Circuit}, dev::MockProver,
 };
-use ff::{FromUniformBytes, PrimeField};
-use halo2_gadgets::poseidon::{PoseidonInstructions, PoseidonSpongeInstructions, PaddedWord};
-use halo2_gadgets::poseidon::primitives::{Absorbing, Domain, SpongeMode, Squeezing, State};
-use halo2_proofs::arithmetic::Field;
+use ff::{PrimeField};
+use halo2_gadgets::poseidon::{PaddedWord};
+use halo2_gadgets::poseidon::primitives::{Domain, State};
 use crate::circuit::spec::PoseidonSpec as Poseidon2Spec;
 use crate::utils::TwoChainCurve;
-use random::rngs::OsRng;
-use core::time;
-use std::fs::File;
 use std::marker::PhantomData;
 use std::mem;
 use std::time::Instant;
@@ -518,7 +514,7 @@ where
 
 #[test]
 fn poseidon_hash_longer_input_custom() {
-
+    use random::rngs::OsRng;
     use plotters::prelude::*;
     let root = BitMapBackend::new("Poseidon2HashChip.png", (1024, 3096)).into_drawing_area();
     root.fill(&WHITE).unwrap();
@@ -531,13 +527,13 @@ fn poseidon_hash_longer_input_custom() {
     // println!("output: {:?}", output);
 
     let k = 6;
-    let circuit = Poseidon2HashCircuit::<grumpkin::G1Affine> {
-        message,
-    };
-
-    // let circuit = Poseidon2TranscriptCircuit::<grumpkin::G1Affine> {
+    // let circuit = Poseidon2HashCircuit::<grumpkin::G1Affine> {
     //     message,
     // };
+
+    let circuit = Poseidon2TranscriptCircuit::<grumpkin::G1Affine> {
+        message,
+    };
 
     let prover = MockProver::run(k, &circuit, vec![]).unwrap();
     println!("Witness count: {}", prover.witness_count);
