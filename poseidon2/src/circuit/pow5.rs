@@ -6,7 +6,7 @@ use halo2_proofs::{
     arithmetic::Field,
     circuit::{Chip, Layouter, Region, Value},
     plonk::{
-        Advice, Any, Column, ConstraintSystem, Constraints, Error, Expression, Fixed, Selector,
+        AccU, Advice, Any, Column, ConstraintSystem, Constraints, Error, Expression, Fixed, Selector
     },
     poly::Rotation,
 };
@@ -143,6 +143,7 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             v.clone() * v.clone()
         };
 
+        // linear constraint, doesnt contribute to error no need to homogenize
         meta.create_gate("first layer", |meta| {
             let s_first = meta.query_selector(s_first);
             
@@ -166,6 +167,7 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
 
         meta.create_gate("full round", |meta| {
             let s_full = meta.query_selector(s_full);
+            let u = Expression::AccU(AccU{index: 0});
 
             Constraints::with_selector(
                 s_full,
@@ -176,17 +178,17 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
                             .map(|idx| {
                                 let state_cur = meta.query_advice(state[idx], Rotation::cur());
                                 let rc_a = meta.query_fixed(rc_full_rounds[idx], Rotation::cur());
-                                pow_5(state_cur + rc_a) * mat_external[next_idx][idx]
+                                pow_5(state_cur + rc_a * u.clone()) * mat_external[next_idx][idx]
                             })
                             .reduce(|acc, term| acc + term)
                             .expect("WIDTH > 0");
-                        expr - state_next
+                        (expr - state_next * pow_4(u.clone())) * u.clone()
                     })
                     .collect::<Vec<_>>(),
             )
         });
 
-        //dup
+        // dup
         // meta.create_gate("full rounds", |meta| {
         //     let cur = (0..WIDTH).map(|i| meta.query_advice(state[i], Rotation::cur())).collect::<Vec<_>>();
         //     let rc_a = (0..WIDTH).map(|i| meta.query_fixed(rc_full_rounds[i], Rotation::cur())).collect::<Vec<_>>();
@@ -215,6 +217,8 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             let mid_before_last_0 = meta.query_advice(partial_sbox_before, Rotation::cur());
             let rc_a = (0..NUM_PARTIAL_SBOX).map(|i| meta.query_fixed(rc_partial_rounds[i], Rotation::cur())).collect::<Vec<_>>();
             let s_partial = meta.query_selector(s_partial);
+            let u = Expression::AccU(AccU{index: 0});
+
             // matmul_internal
             let mut sum = mid_0[0].clone(); // pow_5(rc[0] + state0)
             let mut mid = vec![Expression::Constant(F::ZERO); WIDTH];
@@ -251,13 +255,14 @@ impl<F: PrimeField, const WIDTH: usize, const RATE: usize> Pow5Chip<F, WIDTH, RA
             Constraints::with_selector(
                 s_partial,
                 std::iter::empty()
-                    .chain(Some(pow_5(cur_0 + rc_a[0].clone()) - mid_0[0].clone()))
-                    .chain((1..NUM_PARTIAL_SBOX).map(|i| pow_5(mid_0_before_add[i - 1].clone() + rc_a[i].clone()) - mid_0[i].clone()))
+                    .chain(Some((pow_5(cur_0 + rc_a[0].clone() * u.clone()) - mid_0[0].clone() * pow_4(u.clone())) * u.clone()))
+                    .chain((1..NUM_PARTIAL_SBOX).map(|i| u.clone() * (pow_5(mid_0_before_add[i - 1].clone() + rc_a[i].clone() * u.clone()) - mid_0[i].clone() * pow_4(u.clone()))))
                     .chain((0..WIDTH).map(|idx| mid[idx].clone() - next[idx].clone()))
                     .collect::<Vec<_>>(),
             )
         });
 
+        // linear constraint, doesnt contribute to error no need to homogenize
         meta.create_gate("pad-and-add", |meta| {
             let initial_state_rate = meta.query_advice(state[RATE], Rotation::prev());
             let output_state_rate = meta.query_advice(state[RATE], Rotation::next());
